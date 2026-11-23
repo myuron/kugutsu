@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  nix:
+    name: nix flake check & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: flake check (treefmt included)
+        run: nix flake check --print-build-logs
+      - name: build
+        run: nix build --print-build-logs
+
+  cargo:
+    name: cargo fmt / clippy / test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: fmt
+        run: nix develop --command cargo fmt --all --check
+      - name: clippy
+        run: nix develop --command cargo clippy --all-targets --locked -- -D warnings
+      - name: test
+        run: nix develop --command cargo test --all-targets --locked

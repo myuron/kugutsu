@@ -29,6 +29,7 @@ pub const INITIAL_SIZE: GridSize = GridSize {
 const DEFAULT_TITLE: &str = "kugutsu";
 /// タイトル未設定のタブに表示する名前。
 const UNTITLED_TAB: &str = "shell";
+const WORKSPACE_BAR_HEIGHT: f32 = 28.0;
 const TAB_BAR_HEIGHT: f32 = 28.0;
 const STATUS_LINE_HEIGHT: f32 = 22.0;
 const BAR_BACKGROUND: u32 = 0x181818;
@@ -59,8 +60,23 @@ impl Tab {
     }
 }
 
-pub struct WorkspaceView {
+/// タブのグループ。workspace ラインで切り替える。
+struct Workspace {
     tabs: Tabs<Tab>,
+}
+
+impl Workspace {
+    fn new(first: Pane) -> Self {
+        Self {
+            tabs: Tabs::new(Tab {
+                panes: Panes::new(first),
+            }),
+        }
+    }
+}
+
+pub struct WorkspaceView {
+    workspaces: Tabs<Workspace>,
     keymap: PrefixKeymap,
     /// 新しいタブ・ペインで起動するプログラム。
     spawn_options: SpawnOptions,
@@ -81,9 +97,7 @@ impl WorkspaceView {
     ) -> Self {
         let first = Self::create_pane(terminal, events, window, cx);
         let this = Self {
-            tabs: Tabs::new(Tab {
-                panes: Panes::new(first),
-            }),
+            workspaces: Tabs::new(Workspace::new(first)),
             keymap: PrefixKeymap::default(),
             spawn_options,
             sidebar_visible: true,
@@ -105,14 +119,38 @@ impl WorkspaceView {
         })
     }
 
+    /// アクティブな workspace のタブ集合。
+    fn active_tabs(&self) -> Option<&Tabs<Tab>> {
+        self.workspaces.active().map(|workspace| &workspace.tabs)
+    }
+
+    fn active_tabs_mut(&mut self) -> Option<&mut Tabs<Tab>> {
+        self.workspaces
+            .active_mut()
+            .map(|workspace| &mut workspace.tabs)
+    }
+
+    fn active_tab(&self) -> Option<&Tab> {
+        self.active_tabs().and_then(Tabs::active)
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.active_tabs_mut().and_then(Tabs::active_mut)
+    }
+
     fn refresh_agents(&mut self, cx: &mut Context<Self>) {
-        let active_tab = self.tabs.active_index();
+        let active_workspace = self.workspaces.active_index();
         let mut changed = false;
-        for (tab_index, tab) in self.tabs.iter().enumerate() {
-            let active_pane = tab.panes.active_id();
-            for (pane_id, pane) in tab.panes.iter() {
-                let focused = tab_index == active_tab && pane_id == active_pane;
-                changed |= pane.view.update(cx, |view, _| view.refresh_agent(focused));
+        for (workspace_index, workspace) in self.workspaces.iter().enumerate() {
+            let active_tab = workspace.tabs.active_index();
+            for (tab_index, tab) in workspace.tabs.iter().enumerate() {
+                let active_pane = tab.panes.active_id();
+                for (pane_id, pane) in tab.panes.iter() {
+                    let focused = workspace_index == active_workspace
+                        && tab_index == active_tab
+                        && pane_id == active_pane;
+                    changed |= pane.view.update(cx, |view, _| view.refresh_agent(focused));
+                }
             }
         }
         if changed {
@@ -138,8 +176,7 @@ impl WorkspaceView {
     /// 今のペインと同程度の領域に出るので、再描画時のリサイズを小さく抑えられる。
     fn spawn_pane(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Pane> {
         let size = self
-            .tabs
-            .active()
+            .active_tab()
             .and_then(Tab::active_view)
             .map_or(INITIAL_SIZE, |view| view.read(cx).grid_size());
         match Terminal::spawn(self.spawn_options.clone(), size) {
@@ -164,12 +201,22 @@ impl WorkspaceView {
                 cx.notify();
             }
             TerminalViewEvent::Exited => {
-                let found = self.tabs.iter().enumerate().find_map(|(index, tab)| {
-                    let id = tab.panes.find(|pane| &pane.view == view)?;
-                    Some((index, id))
-                });
-                if let Some((tab_index, pane_id)) = found {
-                    self.close_pane(tab_index, pane_id, window, cx);
+                let found =
+                    self.workspaces
+                        .iter()
+                        .enumerate()
+                        .find_map(|(workspace_index, workspace)| {
+                            workspace
+                                .tabs
+                                .iter()
+                                .enumerate()
+                                .find_map(|(tab_index, tab)| {
+                                    let id = tab.panes.find(|pane| &pane.view == view)?;
+                                    Some((workspace_index, tab_index, id))
+                                })
+                        });
+                if let Some((workspace_index, tab_index, pane_id)) = found {
+                    self.close_pane(workspace_index, tab_index, pane_id, window, cx);
                 }
             }
         }
@@ -193,20 +240,30 @@ impl WorkspaceView {
     fn run(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         match command {
             Command::NewTab => return self.new_tab(window, cx),
+            Command::NewWorkspace => return self.new_workspace(window, cx),
             Command::Split(axis) => return self.split(axis, window, cx),
             Command::ClosePane => {
-                let tab_index = self.tabs.active_index();
-                if let Some(pane_id) = self.tabs.active().map(|tab| tab.panes.active_id()) {
-                    self.close_pane(tab_index, pane_id, window, cx);
+                let workspace_index = self.workspaces.active_index();
+                if let Some(tabs) = self.active_tabs() {
+                    let tab_index = tabs.active_index();
+                    if let Some(pane_id) = tabs.active().map(|tab| tab.panes.active_id()) {
+                        self.close_pane(workspace_index, tab_index, pane_id, window, cx);
+                    }
                 }
                 return;
             }
-            Command::NextTab => self.tabs.next(),
-            Command::PrevTab => self.tabs.prev(),
-            Command::SelectTab(index) => self.tabs.select(index),
+            Command::NextTab => self.active_tabs_mut().into_iter().for_each(Tabs::next),
+            Command::PrevTab => self.active_tabs_mut().into_iter().for_each(Tabs::prev),
+            Command::SelectTab(index) => {
+                if let Some(tabs) = self.active_tabs_mut() {
+                    tabs.select(index);
+                }
+            }
+            Command::NextWorkspace => self.workspaces.next(),
+            Command::PrevWorkspace => self.workspaces.prev(),
             Command::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
             Command::Focus(direction) => {
-                if let Some(tab) = self.tabs.active_mut() {
+                if let Some(tab) = self.active_tab_mut() {
                     tab.panes.focus(direction);
                 }
             }
@@ -219,9 +276,27 @@ impl WorkspaceView {
         let Some(pane) = self.spawn_pane(window, cx) else {
             return;
         };
-        self.tabs.push(Tab {
+        let Some(tabs) = self.active_tabs_mut() else {
+            return;
+        };
+        tabs.push(Tab {
             panes: Panes::new(pane),
         });
+        self.activate(window, cx);
+        cx.notify();
+    }
+
+    fn new_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane) = self.spawn_pane(window, cx) else {
+            return;
+        };
+        self.workspaces.push(Workspace::new(pane));
+        self.activate(window, cx);
+        cx.notify();
+    }
+
+    fn select_workspace(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspaces.select(index);
         self.activate(window, cx);
         cx.notify();
     }
@@ -230,7 +305,7 @@ impl WorkspaceView {
         let Some(pane) = self.spawn_pane(window, cx) else {
             return;
         };
-        let Some(tab) = self.tabs.active_mut() else {
+        let Some(tab) = self.active_tab_mut() else {
             return;
         };
         tab.panes.split(axis, pane);
@@ -238,21 +313,25 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// アクティブなタブの中で指定したペインをアクティブにする（クリック時）。
-    /// 指定したタブのペインへ移る（サイドバーの Agent をクリックしたとき）。
-    fn focus_tab_pane(
+    /// 指定した workspace・タブのペインへ移る（サイドバーの Agent をクリックしたとき）。
+    fn focus_agent_pane(
         &mut self,
+        workspace_index: usize,
         tab_index: usize,
         pane_id: PaneId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.tabs.select(tab_index);
+        self.workspaces.select(workspace_index);
+        if let Some(tabs) = self.active_tabs_mut() {
+            tabs.select(tab_index);
+        }
         self.focus_pane(pane_id, window, cx);
     }
 
+    /// アクティブなタブの中で指定したペインをアクティブにする（クリック時）。
     fn focus_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.active_mut() {
+        if let Some(tab) = self.active_tab_mut() {
             tab.panes.set_active(pane_id);
         }
         self.activate(window, cx);
@@ -262,30 +341,56 @@ impl WorkspaceView {
     /// ペインを閉じる（ターミナルは破棄時にシェルを終了させる）。最後のペインならタブを閉じる。
     fn close_pane(
         &mut self,
+        workspace_index: usize,
         tab_index: usize,
         pane_id: PaneId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(tab_index) else {
+        let Some(tab) = self
+            .workspaces
+            .get_mut(workspace_index)
+            .and_then(|workspace| workspace.tabs.get_mut(tab_index))
+        else {
             return;
         };
         if tab.panes.remove(pane_id).is_none() {
             return;
         }
         if tab.panes.is_empty() {
-            return self.close_tab(tab_index, window, cx);
+            return self.close_tab(workspace_index, tab_index, window, cx);
         }
         self.activate(window, cx);
         cx.notify();
     }
 
-    /// タブを閉じる。最後のタブならウィンドウを閉じる。
-    fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tabs.remove(index).is_none() {
+    /// タブを閉じる。最後のタブなら workspace を閉じる。
+    fn close_tab(
+        &mut self,
+        workspace_index: usize,
+        tab_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspaces.get_mut(workspace_index) else {
+            return;
+        };
+        if workspace.tabs.remove(tab_index).is_none() {
             return;
         }
-        if self.tabs.is_empty() {
+        if workspace.tabs.is_empty() {
+            return self.close_workspace(workspace_index, window, cx);
+        }
+        self.activate(window, cx);
+        cx.notify();
+    }
+
+    /// workspace を閉じる。最後の workspace ならウィンドウを閉じる。
+    fn close_workspace(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspaces.remove(index).is_none() {
+            return;
+        }
+        if self.workspaces.is_empty() {
             window.remove_window();
             return;
         }
@@ -295,7 +400,7 @@ impl WorkspaceView {
 
     /// アクティブなタブのアクティブなペインにフォーカスを移し、ウィンドウタイトルを合わせる。
     fn activate(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.tabs.active().and_then(Tab::active_view) {
+        if let Some(view) = self.active_tab().and_then(Tab::active_view) {
             window.focus(&view.focus_handle(cx));
         }
         self.sync_window_title(window, cx);
@@ -303,69 +408,79 @@ impl WorkspaceView {
 
     fn sync_window_title(&self, window: &mut Window, cx: &mut Context<Self>) {
         let title = self
-            .tabs
-            .active()
+            .active_tab()
             .and_then(Tab::active_view)
             .and_then(|view| view.read(cx).title());
         window.set_window_title(window_title(title));
     }
 
-    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_index = self.tabs.active_index();
-        let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
-            let title = tab.active_view().and_then(|view| view.read(cx).title());
-            let label = tab_label(index, title);
-            let active = index == active_index;
-            div()
-                .id(("tab", index))
-                .flex()
-                .items_center()
-                .px(px(12.0))
-                .border_r_1()
-                .border_color(rgb(BAR_BORDER))
-                .text_color(rgb(if active {
-                    colors::DEFAULT_FOREGROUND
-                } else {
-                    INACTIVE_TAB_FOREGROUND
-                }))
-                .when(active, |tab| tab.bg(rgb(colors::DEFAULT_BACKGROUND)))
-                .child(label)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.run(Command::SelectTab(index), window, cx)
-                }))
-        });
+    /// タブバーの上に置く workspace の一覧。クリックでその workspace へ切り替える。
+    fn render_workspace_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_index = self.workspaces.active_index();
+        let items =
+            (0..self.workspaces.iter().count()).map(|index| {
+                bar_item(index == active_index, workspace_label(index))
+                    .id(("workspace", index))
+                    .debug_selector(|| format!("workspace-{index}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_workspace(index, window, cx)
+                    }))
+            });
+        bar(WORKSPACE_BAR_HEIGHT).children(items)
+    }
 
-        div()
-            .flex()
-            .flex_none()
-            .h(px(TAB_BAR_HEIGHT))
-            .text_size(px(12.0))
-            .bg(rgb(BAR_BACKGROUND))
-            .border_b_1()
-            .border_color(rgb(BAR_BORDER))
-            .children(tabs)
+    fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut items = Vec::new();
+        if let Some(tabs) = self.active_tabs() {
+            let active_index = tabs.active_index();
+            for (index, tab) in tabs.iter().enumerate() {
+                let title = tab.active_view().and_then(|view| view.read(cx).title());
+                items.push(
+                    bar_item(index == active_index, tab_label(index, title))
+                        .id(("tab", index))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.run(Command::SelectTab(index), window, cx)
+                        })),
+                );
+            }
+        }
+        bar(TAB_BAR_HEIGHT).children(items)
     }
 
     /// アクティブなタブのペインを分割どおりに並べる。
     fn render_panes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let panes = &self.tabs.active()?.panes;
+        let panes = &self.active_tab()?.panes;
         let root = panes.root()?;
         // ペインが 1 つだけなら枠で強調する必要は無い
         let highlight = matches!(root, Node::Split { .. }).then_some(panes.active_id());
         Some(render_node(root, highlight, cx))
     }
 
-    /// 画面下部のステータスライン。prefix 入力待ちのときはその旨を表示する。
-    /// 全タブ・全ペインで動いている Agent の一覧。クリックでそのペインへ移る。
+    /// 全 workspace・全タブ・全ペインで動いている Agent の一覧。クリックでそのペインへ移る。
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_tab = self.tabs.active_index();
+        let active_workspace = self.workspaces.active_index();
         let mut rows = Vec::new();
-        for (tab_index, tab) in self.tabs.iter().enumerate() {
+        let tabs = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(workspace_index, workspace)| {
+                let active_tab = workspace.tabs.active_index();
+                workspace
+                    .tabs
+                    .iter()
+                    .enumerate()
+                    .map(move |(tab_index, tab)| {
+                        let active = workspace_index == active_workspace && tab_index == active_tab;
+                        (workspace_index, tab_index, tab, active)
+                    })
+            });
+        for (workspace_index, tab_index, tab, active_tab) in tabs {
             for (pane_id, pane) in tab.panes.iter() {
                 let view = pane.view.read(cx);
                 let Some(agent) = view.agent() else { continue };
-                let location = tab_label(tab_index, view.title());
-                let active = tab_index == active_tab && pane_id == tab.panes.active_id();
+                let location = agent_location(workspace_index, tab_index, view.title());
+                let active = active_tab && pane_id == tab.panes.active_id();
                 let color = rgb(state_color(agent.state));
                 let index = rows.len();
                 let row = div()
@@ -399,7 +514,7 @@ impl WorkspaceView {
                             .child(location),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.focus_tab_pane(tab_index, pane_id, window, cx)
+                        this.focus_agent_pane(workspace_index, tab_index, pane_id, window, cx)
                     }));
                 rows.push(row);
             }
@@ -417,12 +532,12 @@ impl WorkspaceView {
             .border_r_1()
             .border_color(rgb(BAR_BORDER))
             .child(
-                // タブバーと高さ・下線を揃える
+                // workspace ライン＋タブバーと高さ・下線を揃える
                 div()
                     .flex()
                     .flex_none()
                     .items_center()
-                    .h(px(TAB_BAR_HEIGHT))
+                    .h(px(WORKSPACE_BAR_HEIGHT + TAB_BAR_HEIGHT))
                     .px(px(10.0))
                     .border_b_1()
                     .border_color(rgb(BAR_BORDER))
@@ -440,6 +555,7 @@ impl WorkspaceView {
             .children(rows)
     }
 
+    /// 画面下部のステータスライン。prefix 入力待ちのときはその旨を表示する。
     fn render_status_line(&self) -> impl IntoElement {
         div()
             .flex()
@@ -535,6 +651,7 @@ impl Render for WorkspaceView {
                             .flex_col()
                             .flex_1()
                             .min_w(px(0.0))
+                            .child(self.render_workspace_bar(cx))
                             .child(self.render_tab_bar(cx))
                             .child(
                                 div()
@@ -547,6 +664,35 @@ impl Render for WorkspaceView {
             )
             .child(self.render_status_line())
     }
+}
+
+/// workspace ライン・タブバーの土台（横並び・下線付き）。
+fn bar(height: f32) -> gpui::Div {
+    div()
+        .flex()
+        .flex_none()
+        .h(px(height))
+        .text_size(px(12.0))
+        .bg(rgb(BAR_BACKGROUND))
+        .border_b_1()
+        .border_color(rgb(BAR_BORDER))
+}
+
+/// workspace ライン・タブバーの 1 項目。アクティブなものは背景を本文と揃えて強調する。
+fn bar_item(active: bool, label: String) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .px(px(12.0))
+        .border_r_1()
+        .border_color(rgb(BAR_BORDER))
+        .text_color(rgb(if active {
+            colors::DEFAULT_FOREGROUND
+        } else {
+            INACTIVE_TAB_FOREGROUND
+        }))
+        .when(active, |item| item.bg(rgb(colors::DEFAULT_BACKGROUND)))
+        .child(label)
 }
 
 /// サイドバーで Agent の状態を表す色。
@@ -562,6 +708,16 @@ fn state_color(state: AgentState) -> u32 {
 /// タブバーに表示する名前（番号は prefix + 数字キーで選ぶときの番号）。
 fn tab_label(index: usize, title: Option<&str>) -> String {
     format!("{}: {}", index + 1, title.unwrap_or(UNTITLED_TAB))
+}
+
+/// workspace ラインに表示する名前。
+fn workspace_label(index: usize) -> String {
+    format!("Workspace {}", index + 1)
+}
+
+/// サイドバーで Agent がどの workspace・タブにいるかを表す。
+fn agent_location(workspace_index: usize, tab_index: usize, title: Option<&str>) -> String {
+    format!("W{} {}", workspace_index + 1, tab_label(tab_index, title))
 }
 
 fn window_title(title: Option<&str>) -> &str {
@@ -626,15 +782,36 @@ mod tests {
         }
     }
 
+    /// アクティブな workspace の位置と、その中のアクティブなタブの位置。
+    fn active_position(
+        workspace: &Entity<WorkspaceView>,
+        cx: &mut VisualTestContext,
+    ) -> (usize, usize) {
+        workspace.read_with(cx, |w, _| {
+            (
+                w.workspaces.active_index(),
+                w.active_tabs().unwrap().active_index(),
+            )
+        })
+    }
+
+    fn workspace_count(workspace: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> usize {
+        workspace.read_with(cx, |w, _| w.workspaces.iter().count())
+    }
+
+    fn active_tab_count(workspace: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> usize {
+        workspace.read_with(cx, |w, _| w.active_tabs().unwrap().iter().count())
+    }
+
     #[cfg(target_os = "linux")]
     #[gpui::test]
     fn clicking_agent_in_sidebar_focuses_its_tab(cx: &mut TestAppContext) {
         let (workspace, cx) = open_workspace_with(cx, fake_claude());
         cx.simulate_keystrokes("ctrl-b c");
-        assert_eq!(workspace.read_with(cx, |w, _| w.tabs.active_index()), 1);
+        assert_eq!(active_position(&workspace, cx), (0, 1));
 
         poll_until(&workspace, cx, |workspace, cx| {
-            let first_tab = workspace.tabs.iter().next().unwrap();
+            let first_tab = workspace.active_tabs().unwrap().iter().next().unwrap();
             first_tab
                 .active_view()
                 .is_some_and(|view| view.read(cx).agent().is_some())
@@ -642,7 +819,93 @@ mod tests {
 
         let row = cx.debug_bounds("agent-0").expect("agent row is rendered");
         cx.simulate_click(row.center(), gpui::Modifiers::none());
-        assert_eq!(workspace.read_with(cx, |w, _| w.tabs.active_index()), 0);
+        assert_eq!(active_position(&workspace, cx), (0, 0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn clicking_agent_in_other_workspace_switches_to_it(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with(cx, fake_claude());
+        cx.simulate_keystrokes("ctrl-b shift-c");
+        assert_eq!(active_position(&workspace, cx), (1, 0));
+
+        poll_until(&workspace, cx, |workspace, cx| {
+            let first = workspace.workspaces.iter().next().unwrap();
+            first
+                .tabs
+                .active()
+                .and_then(Tab::active_view)
+                .is_some_and(|view| view.read(cx).agent().is_some())
+        });
+
+        let row = cx.debug_bounds("agent-0").expect("agent row is rendered");
+        cx.simulate_click(row.center(), gpui::Modifiers::none());
+        assert_eq!(active_position(&workspace, cx), (0, 0));
+    }
+
+    #[gpui::test]
+    fn prefix_shift_c_opens_new_workspace(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        assert_eq!(workspace_count(&workspace, cx), 1);
+
+        cx.simulate_keystrokes("ctrl-b shift-c");
+        assert_eq!(workspace_count(&workspace, cx), 2);
+        assert_eq!(active_position(&workspace, cx), (1, 0));
+        assert_eq!(active_tab_count(&workspace, cx), 1);
+    }
+
+    #[gpui::test]
+    fn workspaces_keep_their_own_tabs(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        cx.simulate_keystrokes("ctrl-b c");
+        cx.simulate_keystrokes("ctrl-b shift-c");
+        assert_eq!(active_tab_count(&workspace, cx), 1);
+
+        cx.simulate_keystrokes("ctrl-b shift-p");
+        assert_eq!(active_position(&workspace, cx), (0, 1));
+        assert_eq!(active_tab_count(&workspace, cx), 2);
+
+        cx.simulate_keystrokes("ctrl-b shift-n");
+        assert_eq!(active_position(&workspace, cx), (1, 0));
+        // 末尾からは先頭へ循環する
+        cx.simulate_keystrokes("ctrl-b shift-n");
+        assert_eq!(active_position(&workspace, cx), (0, 1));
+    }
+
+    #[gpui::test]
+    fn clicking_workspace_selects_it(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        cx.simulate_keystrokes("ctrl-b shift-c");
+        assert_eq!(active_position(&workspace, cx), (1, 0));
+
+        let item = cx
+            .debug_bounds("workspace-0")
+            .expect("workspace item is rendered");
+        cx.simulate_click(item.center(), gpui::Modifiers::none());
+        assert_eq!(active_position(&workspace, cx), (0, 0));
+    }
+
+    #[gpui::test]
+    fn closing_last_tab_closes_workspace(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        cx.simulate_keystrokes("ctrl-b shift-c");
+        assert_eq!(workspace_count(&workspace, cx), 2);
+
+        cx.simulate_keystrokes("ctrl-b x");
+        assert_eq!(workspace_count(&workspace, cx), 1);
+        assert_eq!(active_position(&workspace, cx), (0, 0));
+    }
+
+    #[test]
+    fn workspace_label_numbers_from_one() {
+        assert_eq!(workspace_label(0), "Workspace 1");
+        assert_eq!(workspace_label(2), "Workspace 3");
+    }
+
+    #[test]
+    fn agent_location_includes_workspace_and_tab() {
+        assert_eq!(agent_location(0, 1, Some("vim")), "W1 2: vim");
+        assert_eq!(agent_location(2, 0, None), "W3 1: shell");
     }
 
     #[gpui::test]

@@ -31,6 +31,8 @@ const DEFAULT_TITLE: &str = "kugutsu";
 const UNTITLED_TAB: &str = "shell";
 const WORKSPACE_BAR_HEIGHT: f32 = 28.0;
 const TAB_BAR_HEIGHT: f32 = 28.0;
+/// workspace ライン・タブバーの各項目の幅（両者で揃える）。
+const BAR_ITEM_WIDTH: f32 = 140.0;
 const STATUS_LINE_HEIGHT: f32 = 22.0;
 const BAR_BACKGROUND: u32 = 0x181818;
 const BAR_BORDER: u32 = 0x2b2b2b;
@@ -438,6 +440,7 @@ impl WorkspaceView {
                 items.push(
                     bar_item(index == active_index, tab_label(index, title))
                         .id(("tab", index))
+                        .debug_selector(|| format!("tab-{index}"))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.run(Command::SelectTab(index), window, cx)
                         })),
@@ -679,10 +682,14 @@ fn bar(height: f32) -> gpui::Div {
 }
 
 /// workspace ライン・タブバーの 1 項目。アクティブなものは背景を本文と揃えて強調する。
+/// 上下の段で区切りが揃うよう幅は固定し、収まらないラベルは省略する。
 fn bar_item(active: bool, label: String) -> gpui::Div {
     div()
         .flex()
+        .flex_none()
         .items_center()
+        .w(px(BAR_ITEM_WIDTH))
+        .overflow_hidden()
         .px(px(12.0))
         .border_r_1()
         .border_color(rgb(BAR_BORDER))
@@ -692,7 +699,7 @@ fn bar_item(active: bool, label: String) -> gpui::Div {
             INACTIVE_TAB_FOREGROUND
         }))
         .when(active, |item| item.bg(rgb(colors::DEFAULT_BACKGROUND)))
-        .child(label)
+        .child(div().min_w(px(0.0)).truncate().child(label))
 }
 
 /// サイドバーで Agent の状態を表す色。
@@ -883,6 +890,20 @@ mod tests {
             .expect("workspace item is rendered");
         cx.simulate_click(item.center(), gpui::Modifiers::none());
         assert_eq!(active_position(&workspace, cx), (0, 0));
+    }
+
+    #[gpui::test]
+    fn workspace_and_tab_items_have_same_width(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace(cx);
+        cx.run_until_parked();
+
+        let workspace_item = cx
+            .debug_bounds("workspace-0")
+            .expect("workspace item is rendered");
+        let tab_item = cx.debug_bounds("tab-0").expect("tab item is rendered");
+        // ラベルの長さ（"Workspace 1" と "1: shell"）が違っても幅は揃う
+        assert_eq!(workspace_item.size.width, tab_item.size.width);
+        assert_eq!(workspace_item.size.width, px(BAR_ITEM_WIDTH));
     }
 
     #[gpui::test]

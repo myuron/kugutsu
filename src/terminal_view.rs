@@ -4,9 +4,9 @@ use alacritty_terminal::event::Event;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    App, Bounds, Context, FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight, Hsla,
-    KeyDownEvent, Pixels, Render, StrikethroughStyle, Task, TextRun, UnderlineStyle, Window,
-    canvas, div, fill, font, point, prelude::*, px, rgb, size,
+    App, Bounds, Context, EventEmitter, FocusHandle, Focusable, Font, FontFeatures, FontStyle,
+    FontWeight, Hsla, KeyDownEvent, Pixels, Render, StrikethroughStyle, Task, TextRun,
+    UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
 
 use crate::terminal::content::{Snapshot, Style};
@@ -17,15 +17,24 @@ const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT_RATIO: f32 = 1.3;
 const PADDING: f32 = 4.0;
 const CURSOR_OPACITY: f32 = 0.6;
-const DEFAULT_TITLE: &str = "kugutsu";
 /// 等幅フォントが見つからないときに gpui へ渡すファミリー名。
 const FALLBACK_FONT_FAMILY: &str = "monospace";
+
+/// 親（タブなど）が反応すべきビューのイベント。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalViewEvent {
+    /// [`TerminalView::title`] が変わった。
+    TitleChanged,
+    /// プロセスが終了した。
+    Exited,
+}
 
 // TODO: IME（日本語入力）対応。EntityInputHandler を実装して確定文字列を PTY に書き込む。
 pub struct TerminalView {
     terminal: Terminal,
     focus_handle: FocusHandle,
     metrics: CellMetrics,
+    title: Option<String>,
     _events: Task<()>,
 }
 
@@ -82,14 +91,22 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let focus_handle = cx.focus_handle();
-        window.focus(&focus_handle);
         Self {
             terminal,
-            focus_handle,
+            focus_handle: cx.focus_handle(),
             metrics: CellMetrics::measure(window),
+            title: None,
             _events: Self::handle_events(events, window, cx),
         }
+    }
+
+    /// プログラムが OSC で設定したタイトル。
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    pub fn grid_size(&self) -> GridSize {
+        self.terminal.size()
     }
 
     fn handle_events(
@@ -102,25 +119,26 @@ impl TerminalView {
                 let Ok(event) = this.update(cx, |view, _| view.terminal.handle_event(event)) else {
                     break;
                 };
-                let result = match event {
-                    None => Ok(()),
-                    Some(TerminalEvent::Wakeup) => this.update(cx, |_, cx| cx.notify()),
-                    Some(TerminalEvent::Title(title)) => {
-                        cx.update(|window, _| window.set_window_title(&title))
-                    }
-                    Some(TerminalEvent::ResetTitle) => {
-                        cx.update(|window, _| window.set_window_title(DEFAULT_TITLE))
-                    }
-                    Some(TerminalEvent::Exit) => {
-                        let _ = cx.update(|window, _| window.remove_window());
-                        break;
-                    }
-                };
-                if result.is_err() {
+                let Some(event) = event else { continue };
+                let exited = event == TerminalEvent::Exit;
+                let updated = this.update(cx, |view, cx| match event {
+                    TerminalEvent::Wakeup => cx.notify(),
+                    TerminalEvent::Title(title) => view.set_title(Some(title), cx),
+                    TerminalEvent::ResetTitle => view.set_title(None, cx),
+                    TerminalEvent::Exit => cx.emit(TerminalViewEvent::Exited),
+                });
+                if exited || updated.is_err() {
                     break;
                 }
             }
         })
+    }
+
+    fn set_title(&mut self, title: Option<String>, cx: &mut Context<Self>) {
+        if self.title != title {
+            self.title = title;
+            cx.emit(TerminalViewEvent::TitleChanged);
+        }
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -131,6 +149,8 @@ impl TerminalView {
         }
     }
 }
+
+impl EventEmitter<TerminalViewEvent> for TerminalView {}
 
 impl Focusable for TerminalView {
     fn focus_handle(&self, _: &App) -> FocusHandle {

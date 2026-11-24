@@ -21,7 +21,7 @@ use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::tty::{self, Options, Shell};
 use futures::channel::mpsc::{self, UnboundedReceiver};
 
-use content::Snapshot;
+use content::{Cursor, Snapshot};
 use listener::Listener;
 use process::ProcessInfo;
 use size::GridSize;
@@ -167,6 +167,11 @@ impl Terminal {
 
     pub fn snapshot(&self) -> Snapshot {
         content::snapshot(&self.term.lock())
+    }
+
+    /// 表示・非表示に関わらないカーソル位置（IME の変換中文字列を置く場所）。画面全体を走査しない。
+    pub fn cursor_position(&self) -> Option<Cursor> {
+        content::cursor_position(&self.term.lock())
     }
 
     /// 画面の各行の文字列（行末の空白は除く）。

@@ -6,14 +6,14 @@ use futures::channel::mpsc::UnboundedReceiver;
 use std::ops::Range;
 
 use gpui::{
-    App, Bounds, Context, ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle,
-    Focusable, Font, FontFeatures, FontStyle, FontWeight, Hsla, KeyDownEvent, Pixels, Point,
-    Render, StrikethroughStyle, Task, TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div,
-    fill, font, point, prelude::*, px, rgb, size,
+    App, Bounds, ContentMask, Context, ElementInputHandler, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight, Hsla, KeyDownEvent, Pixels,
+    Point, Render, StrikethroughStyle, Subscription, Task, TextRun, UTF16Selection, UnderlineStyle,
+    Window, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
 
 use crate::agents::{self, AgentTracker};
-use crate::terminal::content::{Snapshot, Style};
+use crate::terminal::content::{Cursor, Snapshot, Style};
 use crate::terminal::size::GridSize;
 use crate::terminal::{Terminal, TerminalEvent, colors, keys};
 
@@ -43,6 +43,7 @@ pub struct TerminalView {
     /// フォアグラウンドで動いている Agent（[`TerminalView::refresh_agent`] で更新する）。
     agent: Option<AgentTracker>,
     _events: Task<()>,
+    _blur: Subscription,
 }
 
 /// セル格子の描画に使うフォントとセルサイズ。
@@ -98,14 +99,23 @@ impl TerminalView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let focus_handle = cx.focus_handle();
+        // フォーカスが移ると IME は変換中文字列をこのビューに消しに来ないことがある。
+        // 残るとキー入力を握りつぶし続けるので、ここで捨てる
+        let blur = cx.on_blur(&focus_handle, window, |view, _, cx| {
+            if view.marked_text.take().is_some() {
+                cx.notify();
+            }
+        });
         Self {
             terminal,
-            focus_handle: cx.focus_handle(),
+            focus_handle,
             metrics: CellMetrics::measure(window),
             title: None,
             marked_text: None,
             agent: None,
             _events: Self::handle_events(events, window, cx),
+            _blur: blur,
         }
     }
 
@@ -254,7 +264,7 @@ impl EntityInputHandler for TerminalView {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let cursor = self.terminal.snapshot().cursor?;
+        let cursor = self.terminal.cursor_position()?;
         Some(cursor_cell_bounds(
             element_bounds.origin,
             &self.metrics,
@@ -307,7 +317,13 @@ impl Render for TerminalView {
         let prepaint_metrics = self.metrics.clone();
         let paint_metrics = self.metrics.clone();
         let focus_handle = self.focus_handle.clone();
-        let preedit = self.marked_text.clone();
+        // TUI はカーソルを隠して自前で描くので、表示状態に関わらないカーソル位置に置く
+        let preedit = self.marked_text.clone().and_then(|text| {
+            Some(Preedit {
+                text,
+                cursor: self.terminal.cursor_position()?,
+            })
+        });
 
         div()
             .id("terminal")
@@ -340,7 +356,7 @@ impl Render for TerminalView {
                         );
                         paint_snapshot(
                             &snapshot,
-                            preedit.as_deref(),
+                            preedit.as_ref(),
                             &paint_metrics,
                             bounds,
                             window,
@@ -372,7 +388,7 @@ fn cursor_cell_bounds(
 /// スナップショットをセル格子に沿って描画する。`preedit` は IME の変換中文字列で、カーソル位置に重ねる。
 fn paint_snapshot(
     snapshot: &Snapshot,
-    preedit: Option<&str>,
+    preedit: Option<&Preedit>,
     metrics: &CellMetrics,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -410,30 +426,81 @@ fn paint_snapshot(
         }
     }
 
-    let Some(cursor) = snapshot.cursor else {
-        return;
-    };
-    let mut cursor_origin = cell_origin(cursor.row, cursor.col);
     if let Some(preedit) = preedit {
-        // 変換中文字列は自然な幅で描き（全角は 2 セル相当）、その後ろにカーソルを置く
-        let line = window.text_system().shape_line(
-            preedit.to_string().into(),
-            metrics.font_size,
-            &[preedit_run(preedit.len(), &metrics.font)],
-            None,
+        paint_preedit(preedit, metrics, bounds, window, cx);
+    } else if let Some(cursor) = snapshot.cursor {
+        let area = Bounds::new(
+            cell_origin(cursor.row, cursor.col),
+            size(cell_width * cursor.cells as f32, cell_height),
         );
-        let area = Bounds::new(cursor_origin, size(line.width, cell_height));
-        window.paint_quad(fill(area, rgb(colors::DEFAULT_BACKGROUND)));
-        let _ = line.paint(cursor_origin, cell_height, window, cx);
-        cursor_origin.x += line.width;
+        paint_cursor(area, window);
     }
-    let area = Bounds::new(
-        cursor_origin,
-        size(cell_width * cursor.cells as f32, cell_height),
-    );
+}
+
+fn paint_cursor(area: Bounds<Pixels>, window: &mut Window) {
     let mut color: Hsla = rgb(colors::CURSOR).into();
     color.a = CURSOR_OPACITY;
     window.paint_quad(fill(area, color));
+}
+
+/// IME の変換中文字列と、その位置（カーソルが非表示でも分かる位置）。
+struct Preedit {
+    text: String,
+    cursor: Cursor,
+}
+
+/// 変換中文字列をカーソル位置に重ね、その後ろにカーソルを描く。ターミナルの外には描かない。
+fn paint_preedit(
+    preedit: &Preedit,
+    metrics: &CellMetrics,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    // 自然な幅で描く（全角は 2 セル相当）
+    let line = window.text_system().shape_line(
+        preedit.text.clone().into(),
+        metrics.font_size,
+        &[preedit_run(preedit.text.len(), &metrics.font)],
+        None,
+    );
+    let anchor = cursor_cell_bounds(
+        bounds.origin,
+        metrics,
+        preedit.cursor.row,
+        preedit.cursor.col,
+    )
+    .origin;
+    let (text_origin, cursor) = preedit_layout(anchor, line.width, metrics, bounds);
+    window.with_content_mask(Some(ContentMask { bounds }), |window| {
+        let area = Bounds::new(text_origin, size(line.width, metrics.cell_height));
+        window.paint_quad(fill(area, rgb(colors::DEFAULT_BACKGROUND)));
+        let _ = line.paint(text_origin, metrics.cell_height, window, cx);
+        paint_cursor(cursor, window);
+    });
+}
+
+/// 変換中文字列の描画位置と、その後ろに置くカーソルの矩形。
+///
+/// カーソルは挿入位置を示すので、下のセルが全角でも 1 セル幅にする。文字列とカーソルが右端から
+/// はみ出す場合は左へずらす（それでも収まらなければ左端から描き、はみ出した分は切り取られる）。
+fn preedit_layout(
+    anchor: Point<Pixels>,
+    text_width: Pixels,
+    metrics: &CellMetrics,
+    bounds: Bounds<Pixels>,
+) -> (Point<Pixels>, Bounds<Pixels>) {
+    let total_width = text_width + metrics.cell_width;
+    let x = anchor
+        .x
+        .min(bounds.right() - total_width)
+        .max(bounds.left());
+    let text_origin = point(x, anchor.y);
+    let cursor = Bounds::new(
+        point(x + text_width, anchor.y),
+        size(metrics.cell_width, metrics.cell_height),
+    );
+    (text_origin, cursor)
 }
 
 /// IME の変換中文字列のスタイル（既定の前景色に下線）。
@@ -556,6 +623,54 @@ mod tests {
         assert_eq!(bounds.size, size(px(8.0), px(16.0)));
     }
 
+    fn test_metrics() -> CellMetrics {
+        CellMetrics {
+            font: font("Mono"),
+            font_size: px(14.0),
+            cell_width: px(10.0),
+            cell_height: px(20.0),
+        }
+    }
+
+    #[test]
+    fn preedit_starts_at_cursor_and_cursor_follows_it() {
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(100.0)));
+        let (text_origin, cursor) =
+            preedit_layout(point(px(30.0), px(40.0)), px(50.0), &test_metrics(), bounds);
+        assert_eq!(text_origin, point(px(30.0), px(40.0)));
+        // 挿入位置を示すので、下のセルが全角でもカーソルは 1 セル幅
+        assert_eq!(
+            cursor,
+            Bounds::new(point(px(80.0), px(40.0)), size(px(10.0), px(20.0)))
+        );
+    }
+
+    #[test]
+    fn preedit_near_right_edge_is_shifted_left() {
+        let bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(200.0), px(100.0)));
+        let (text_origin, cursor) = preedit_layout(
+            point(px(170.0), px(40.0)),
+            px(50.0),
+            &test_metrics(),
+            bounds,
+        );
+        // 文字列とカーソル（計 60px）が右端に収まるよう左へずらす
+        assert_eq!(text_origin, point(px(140.0), px(40.0)));
+        assert_eq!(cursor.origin, point(px(190.0), px(40.0)));
+    }
+
+    #[test]
+    fn preedit_wider_than_terminal_starts_at_left_edge() {
+        let bounds = Bounds::new(point(px(5.0), px(0.0)), size(px(100.0), px(100.0)));
+        let (text_origin, _) = preedit_layout(
+            point(px(50.0), px(40.0)),
+            px(300.0),
+            &test_metrics(),
+            bounds,
+        );
+        assert_eq!(text_origin, point(px(5.0), px(40.0)));
+    }
+
     mod ime {
         use super::*;
         use crate::terminal::{SpawnOptions, Terminal};
@@ -567,7 +682,17 @@ mod tests {
         fn open_reader(cx: &mut TestAppContext) -> (Entity<TerminalView>, &mut VisualTestContext) {
             // 出力直後にプロセスが終了するとその出力が画面に反映されないことがあるため、
             // 表示後もしばらく動かしておく
-            let script = "printf ready; read line; printf \"got:$line|\"; sleep 30";
+            open_script(
+                cx,
+                "printf ready; read line; printf \"got:$line|\"; sleep 30",
+            )
+        }
+
+        /// `script` を動かすビューを開いてフォーカスし、`ready` が表示されるまで待つ。
+        fn open_script<'a>(
+            cx: &'a mut TestAppContext,
+            script: &str,
+        ) -> (Entity<TerminalView>, &'a mut VisualTestContext) {
             let options = SpawnOptions {
                 program: Some(("sh".into(), vec!["-c".into(), script.into()])),
             };
@@ -674,6 +799,42 @@ mod tests {
                 view.text_for_range(1..3, &mut None, window, cx)
             });
             assert_eq!(text.as_deref(), Some("ほん"));
+        }
+
+        #[gpui::test]
+        fn ime_area_follows_hidden_cursor(cx: &mut TestAppContext) {
+            // TUI のようにカーソルを隠して描くプログラム（2 行目の 3 列目にカーソル）
+            let (view, cx) = open_script(cx, "printf 'ready\\r\\nab\\033[?25l'; sleep 30");
+            set_preedit(&view, cx, "にほん");
+            let element = Bounds::new(point(px(0.0), px(0.0)), size(px(400.0), px(300.0)));
+            let (area, metrics) = view.update_in(cx, |view, window, cx| {
+                (
+                    view.bounds_for_range(0..0, element, window, cx),
+                    view.metrics.clone(),
+                )
+            });
+            assert_eq!(
+                area,
+                Some(cursor_cell_bounds(element.origin, &metrics, 1, 2))
+            );
+        }
+
+        #[gpui::test]
+        fn losing_focus_discards_preedit(cx: &mut TestAppContext) {
+            let (view, cx) = open_reader(cx);
+            // 非アクティブなウィンドウではフォーカスの変化が通知されない
+            cx.update(|window, _| window.activate_window());
+            cx.run_until_parked();
+            set_preedit(&view, cx, "にほん");
+            cx.update(|window, _| window.blur());
+            cx.run_until_parked();
+            assert_eq!(marked_range(&view, cx), None);
+
+            // 戻ってきたらキー入力が効く
+            cx.update(|window, cx| window.focus(&view.focus_handle(cx)));
+            cx.simulate_input("ab");
+            cx.simulate_keystrokes("enter");
+            wait_for_screen(&view, cx, "got:ab|");
         }
     }
 }

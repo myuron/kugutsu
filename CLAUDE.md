@@ -9,6 +9,19 @@
 - プログラミング言語: Rust
 - 描画エンジン: gpui
 
+## 開発環境
+
+- ビルドに必要なツールとライブラリ（Rust ツールチェイン、wayland・vulkan など gpui の依存）は Nix の devShell（`flake.nix`）で用意している
+- 普段は direnv（`.envrc`）が devShell を読み込むが、Claude Code の Bash ツールは direnv を通らない。そのため `cargo` などのビルド・テスト・lint は必ず `nix develop --command` を付けて実行する
+  - 例: `nix develop --command cargo test --all-targets`
+  - 付けずに実行するとリンクエラーになる
+- CI と同じチェック
+  - `nix develop --command cargo fmt --all --check`
+  - `nix develop --command cargo clippy --all-targets --locked -- -D warnings`
+  - `nix develop --command cargo test --all-targets --locked`
+  - `nix flake check`（treefmt を含む）と `nix build`（サンドボックス内でテストも実行する）
+- `python3` は入っていない。ファイル編集にスクリプトを使わず、エディタのツールを使う
+
 ## 作業について
 
 - テスト駆動開発で行うこと。次の順番を守る

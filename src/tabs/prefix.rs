@@ -1,22 +1,29 @@
-//! tmux 風の prefix キーによるタブ操作のキーマップ。
+//! tmux 風の prefix キーによるタブ・ペイン操作のキーマップ。
 //!
-//! prefix を押すと次の 1 キーをタブ操作として解釈する。prefix を 2 回押すと prefix 自体を
+//! prefix を押すと次の 1 キーを操作として解釈する。prefix を 2 回押すと prefix 自体を
 //! ターミナルへ送る。割り当ての無いキーは捨てる。
 
 use gpui::Keystroke;
 
+use crate::panes::{Axis, Direction};
+
 /// prefix キー（gpui のキーストローク表記）。
 pub const PREFIX: &str = "ctrl-b";
 
-/// タブに対する操作。
+/// タブ・ペインに対する操作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TabCommand {
-    New,
-    Close,
-    Next,
-    Prev,
+pub enum Command {
+    NewTab,
+    NextTab,
+    PrevTab,
     /// 0 始まりの位置のタブへ切り替える。
-    Select(usize),
+    SelectTab(usize),
+    /// アクティブなペインを分割する。
+    Split(Axis),
+    /// 隣のペインへフォーカスを移す。
+    Focus(Direction),
+    /// アクティブなペインを閉じる（最後のペインならタブごと閉じる）。
+    ClosePane,
 }
 
 /// キー入力をどう扱うか。
@@ -26,7 +33,7 @@ pub enum KeyOutcome {
     Forward,
     /// キーマップが消費した（ターミナルへは送らない）。
     Consumed,
-    Command(TabCommand),
+    Command(Command),
 }
 
 #[derive(Debug, Default)]
@@ -57,18 +64,24 @@ impl PrefixKeymap {
     }
 }
 
-/// prefix の後に押されたキーに対応するタブ操作。
-fn command_for(keystroke: &Keystroke) -> Option<TabCommand> {
+/// prefix の後に押されたキーに対応する操作。
+fn command_for(keystroke: &Keystroke) -> Option<Command> {
     if keystroke.modifiers.modified() {
         return None;
     }
     let command = match keystroke.key.as_str() {
-        "c" => TabCommand::New,
-        "x" => TabCommand::Close,
-        "n" => TabCommand::Next,
-        "p" => TabCommand::Prev,
+        "c" => Command::NewTab,
+        "n" => Command::NextTab,
+        "p" => Command::PrevTab,
+        "v" => Command::Split(Axis::Horizontal),
+        "s" => Command::Split(Axis::Vertical),
+        "h" => Command::Focus(Direction::Left),
+        "j" => Command::Focus(Direction::Down),
+        "k" => Command::Focus(Direction::Up),
+        "l" => Command::Focus(Direction::Right),
+        "x" => Command::ClosePane,
         key => match key.parse::<usize>() {
-            Ok(number @ 1..=9) => TabCommand::Select(number - 1),
+            Ok(number @ 1..=9) => Command::SelectTab(number - 1),
             _ => return None,
         },
     };
@@ -106,13 +119,19 @@ mod tests {
     #[test]
     fn maps_keys_after_prefix_to_commands() {
         let cases = [
-            ("c", TabCommand::New),
-            ("x", TabCommand::Close),
-            ("n", TabCommand::Next),
-            ("p", TabCommand::Prev),
-            ("1", TabCommand::Select(0)),
-            ("3", TabCommand::Select(2)),
-            ("9", TabCommand::Select(8)),
+            ("c", Command::NewTab),
+            ("n", Command::NextTab),
+            ("p", Command::PrevTab),
+            ("1", Command::SelectTab(0)),
+            ("3", Command::SelectTab(2)),
+            ("9", Command::SelectTab(8)),
+            ("v", Command::Split(Axis::Horizontal)),
+            ("s", Command::Split(Axis::Vertical)),
+            ("h", Command::Focus(Direction::Left)),
+            ("j", Command::Focus(Direction::Down)),
+            ("k", Command::Focus(Direction::Up)),
+            ("l", Command::Focus(Direction::Right)),
+            ("x", Command::ClosePane),
         ];
         for (key, command) in cases {
             let mut keymap = PrefixKeymap::default();

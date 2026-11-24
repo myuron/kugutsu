@@ -1,15 +1,16 @@
-//! ウィンドウのルートビュー。複数のターミナルをタブとして持ち、タブバーと
-//! アクティブなターミナルを描画する。
+//! ウィンドウのルートビュー。複数のタブを持ち、各タブはターミナルを分割したペインを並べる。
+//! タブバーとアクティブなタブのペインを描画する。
 
 use alacritty_terminal::event::Event;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    Context, Entity, Focusable, KeyDownEvent, Render, Subscription, Window, div, prelude::*, px,
-    rgb,
+    AnyElement, Context, Entity, Focusable, KeyDownEvent, MouseButton, Render, Subscription,
+    Window, div, prelude::*, px, rgb,
 };
 
+use crate::panes::{Axis, Node, PaneId, Panes};
 use crate::tabs::Tabs;
-use crate::tabs::prefix::{KeyOutcome, PREFIX, PrefixKeymap, TabCommand};
+use crate::tabs::prefix::{Command, KeyOutcome, PREFIX, PrefixKeymap};
 use crate::terminal::size::GridSize;
 use crate::terminal::{SpawnOptions, Terminal, colors};
 use crate::terminal_view::{TerminalView, TerminalViewEvent};
@@ -31,10 +32,22 @@ const BAR_BACKGROUND: u32 = 0x181818;
 const BAR_BORDER: u32 = 0x2b2b2b;
 const INACTIVE_TAB_FOREGROUND: u32 = 0x8a8a8a;
 const PREFIX_INDICATOR: u32 = 0xdcdcaa;
+/// 分割時にアクティブなペインを囲む枠の色。
+const ACTIVE_PANE_BORDER: u32 = 0x569cd6;
 
-struct Tab {
+struct Pane {
     view: Entity<TerminalView>,
     _subscription: Subscription,
+}
+
+struct Tab {
+    panes: Panes<Pane>,
+}
+
+impl Tab {
+    fn active_view(&self) -> Option<&Entity<TerminalView>> {
+        self.panes.active().map(|pane| &pane.view)
+    }
 }
 
 pub struct WorkspaceView {
@@ -50,26 +63,45 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let first = Self::create_tab(terminal, events, window, cx);
+        let first = Self::create_pane(terminal, events, window, cx);
         let this = Self {
-            tabs: Tabs::new(first),
+            tabs: Tabs::new(Tab {
+                panes: Panes::new(first),
+            }),
             keymap: PrefixKeymap::default(),
         };
         this.activate(window, cx);
         this
     }
 
-    fn create_tab(
+    fn create_pane(
         terminal: Terminal,
         events: UnboundedReceiver<Event>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Tab {
+    ) -> Pane {
         let view = cx.new(|cx| TerminalView::new(terminal, events, window, cx));
         let subscription = cx.subscribe_in(&view, window, Self::on_terminal_event);
-        Tab {
+        Pane {
             view,
             _subscription: subscription,
+        }
+    }
+
+    /// アクティブなペインと同じサイズでターミナルを起動してペインにする。新しいペインは
+    /// 今のペインと同程度の領域に出るので、再描画時のリサイズを小さく抑えられる。
+    fn spawn_pane(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<Pane> {
+        let size = self
+            .tabs
+            .active()
+            .and_then(Tab::active_view)
+            .map_or(INITIAL_SIZE, |view| view.read(cx).grid_size());
+        match Terminal::spawn(SpawnOptions::default(), size) {
+            Ok((terminal, events)) => Some(Self::create_pane(terminal, events, window, cx)),
+            Err(err) => {
+                eprintln!("failed to start terminal: {err}");
+                None
+            }
         }
     }
 
@@ -86,8 +118,12 @@ impl WorkspaceView {
                 cx.notify();
             }
             TerminalViewEvent::Exited => {
-                if let Some(index) = self.tabs.position(|tab| &tab.view == view) {
-                    self.close_tab(index, window, cx);
+                let found = self.tabs.iter().enumerate().find_map(|(index, tab)| {
+                    let id = tab.panes.find(|pane| &pane.view == view)?;
+                    Some((index, id))
+                });
+                if let Some((tab_index, pane_id)) = found {
+                    self.close_pane(tab_index, pane_id, window, cx);
                 }
             }
         }
@@ -108,38 +144,84 @@ impl WorkspaceView {
         }
     }
 
-    fn run(&mut self, command: TabCommand, window: &mut Window, cx: &mut Context<Self>) {
+    fn run(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         match command {
-            TabCommand::New => return self.new_tab(window, cx),
-            TabCommand::Close => return self.close_tab(self.tabs.active_index(), window, cx),
-            TabCommand::Next => self.tabs.next(),
-            TabCommand::Prev => self.tabs.prev(),
-            TabCommand::Select(index) => self.tabs.select(index),
+            Command::NewTab => return self.new_tab(window, cx),
+            Command::Split(axis) => return self.split(axis, window, cx),
+            Command::ClosePane => {
+                let tab_index = self.tabs.active_index();
+                if let Some(pane_id) = self.tabs.active().map(|tab| tab.panes.active_id()) {
+                    self.close_pane(tab_index, pane_id, window, cx);
+                }
+                return;
+            }
+            Command::NextTab => self.tabs.next(),
+            Command::PrevTab => self.tabs.prev(),
+            Command::SelectTab(index) => self.tabs.select(index),
+            Command::Focus(direction) => {
+                if let Some(tab) = self.tabs.active_mut() {
+                    tab.panes.focus(direction);
+                }
+            }
         }
         self.activate(window, cx);
         cx.notify();
     }
 
     fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // 新しいタブは今のタブと同じ表示領域に出るので、そのサイズで起動して再描画時のリサイズを避ける
-        let size = self
-            .tabs
-            .active()
-            .map_or(INITIAL_SIZE, |tab| tab.view.read(cx).grid_size());
-        let (terminal, events) = match Terminal::spawn(SpawnOptions::default(), size) {
-            Ok(spawned) => spawned,
-            Err(err) => {
-                eprintln!("failed to start terminal: {err}");
-                return;
-            }
+        let Some(pane) = self.spawn_pane(window, cx) else {
+            return;
         };
-        let tab = Self::create_tab(terminal, events, window, cx);
-        self.tabs.push(tab);
+        self.tabs.push(Tab {
+            panes: Panes::new(pane),
+        });
         self.activate(window, cx);
         cx.notify();
     }
 
-    /// タブを閉じる（ターミナルは破棄時にシェルを終了させる）。最後のタブならウィンドウを閉じる。
+    fn split(&mut self, axis: Axis, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(pane) = self.spawn_pane(window, cx) else {
+            return;
+        };
+        let Some(tab) = self.tabs.active_mut() else {
+            return;
+        };
+        tab.panes.split(axis, pane);
+        self.activate(window, cx);
+        cx.notify();
+    }
+
+    /// アクティブなタブの中で指定したペインをアクティブにする（クリック時）。
+    fn focus_pane(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.active_mut() {
+            tab.panes.set_active(pane_id);
+        }
+        self.activate(window, cx);
+        cx.notify();
+    }
+
+    /// ペインを閉じる（ターミナルは破棄時にシェルを終了させる）。最後のペインならタブを閉じる。
+    fn close_pane(
+        &mut self,
+        tab_index: usize,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get_mut(tab_index) else {
+            return;
+        };
+        if tab.panes.remove(pane_id).is_none() {
+            return;
+        }
+        if tab.panes.is_empty() {
+            return self.close_tab(tab_index, window, cx);
+        }
+        self.activate(window, cx);
+        cx.notify();
+    }
+
+    /// タブを閉じる。最後のタブならウィンドウを閉じる。
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.tabs.remove(index).is_none() {
             return;
@@ -152,23 +234,28 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// アクティブなタブにフォーカスを移し、ウィンドウタイトルを合わせる。
+    /// アクティブなタブのアクティブなペインにフォーカスを移し、ウィンドウタイトルを合わせる。
     fn activate(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.active() {
-            window.focus(&tab.view.focus_handle(cx));
+        if let Some(view) = self.tabs.active().and_then(Tab::active_view) {
+            window.focus(&view.focus_handle(cx));
         }
         self.sync_window_title(window, cx);
     }
 
     fn sync_window_title(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let title = self.tabs.active().and_then(|tab| tab.view.read(cx).title());
+        let title = self
+            .tabs
+            .active()
+            .and_then(Tab::active_view)
+            .and_then(|view| view.read(cx).title());
         window.set_window_title(window_title(title));
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active_index = self.tabs.active_index();
         let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
-            let label = tab_label(index, tab.view.read(cx).title());
+            let title = tab.active_view().and_then(|view| view.read(cx).title());
+            let label = tab_label(index, title);
             let active = index == active_index;
             div()
                 .id(("tab", index))
@@ -185,7 +272,7 @@ impl WorkspaceView {
                 .when(active, |tab| tab.bg(rgb(colors::DEFAULT_BACKGROUND)))
                 .child(label)
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.run(TabCommand::Select(index), window, cx)
+                    this.run(Command::SelectTab(index), window, cx)
                 }))
         });
 
@@ -198,6 +285,15 @@ impl WorkspaceView {
             .border_b_1()
             .border_color(rgb(BAR_BORDER))
             .children(tabs)
+    }
+
+    /// アクティブなタブのペインを分割どおりに並べる。
+    fn render_panes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let panes = &self.tabs.active()?.panes;
+        let root = panes.root()?;
+        // ペインが 1 つだけなら枠で強調する必要は無い
+        let highlight = matches!(root, Node::Split { .. }).then_some(panes.active_id());
+        Some(render_node(root, highlight, cx))
     }
 
     /// 画面下部のステータスライン。prefix 入力待ちのときはその旨を表示する。
@@ -218,6 +314,62 @@ impl WorkspaceView {
     }
 }
 
+/// ペイン木の節を描画する。分割は子を均等な大きさで並べ、間に境界線を引く。
+/// `highlight` が指すペインは枠で強調する。
+fn render_node(
+    node: &Node<Pane>,
+    highlight: Option<PaneId>,
+    cx: &mut Context<WorkspaceView>,
+) -> AnyElement {
+    match node {
+        Node::Leaf { id, item } => {
+            let id = *id;
+            div()
+                .size_full()
+                .when_some(highlight, |pane, active| {
+                    pane.border_1().border_color(rgb(if id == active {
+                        ACTIVE_PANE_BORDER
+                    } else {
+                        colors::DEFAULT_BACKGROUND
+                    }))
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| this.focus_pane(id, window, cx)),
+                )
+                .child(item.view.clone())
+                .into_any_element()
+        }
+        Node::Split { axis, children } => {
+            let mut container = div().size_full().flex();
+            container = match axis {
+                Axis::Horizontal => container.flex_row(),
+                Axis::Vertical => container.flex_col(),
+            };
+            for (index, child) in children.iter().enumerate() {
+                if index > 0 {
+                    let separator = div().flex_none().bg(rgb(BAR_BORDER));
+                    container = container.child(match axis {
+                        Axis::Horizontal => separator.w(px(1.0)),
+                        Axis::Vertical => separator.h(px(1.0)),
+                    });
+                }
+                container = container.child(
+                    // 中身の大きさに引きずられず均等に分けるため、基準サイズ 0 から伸ばす
+                    div()
+                        .flex_1()
+                        .flex_basis(px(0.0))
+                        .min_w(px(0.0))
+                        .min_h(px(0.0))
+                        .overflow_hidden()
+                        .child(render_node(child, highlight, cx)),
+                );
+            }
+            container.into_any_element()
+        }
+    }
+}
+
 impl Render for WorkspaceView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -230,13 +382,13 @@ impl Render for WorkspaceView {
             .child(
                 div()
                     .flex_1()
+                    .min_h(px(0.0))
                     .overflow_hidden()
-                    .children(self.tabs.active().map(|tab| tab.view.clone())),
+                    .children(self.render_panes(cx)),
             )
             .child(self.render_status_line())
     }
 }
-
 /// タブバーに表示する名前（番号は prefix + 数字キーで選ぶときの番号）。
 fn tab_label(index: usize, title: Option<&str>) -> String {
     format!("{}: {}", index + 1, title.unwrap_or(UNTITLED_TAB))

@@ -72,10 +72,6 @@ impl<T> Tabs<T> {
         self.items.iter()
     }
 
-    pub fn len(&self) -> usize {
-        self.items.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
@@ -97,7 +93,7 @@ mod tests {
     #[test]
     fn starts_with_one_active_tab() {
         let tabs = Tabs::new("a");
-        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs.iter().count(), 1);
         assert_eq!(tabs.active(), Some(&"a"));
         assert_eq!(tabs.active_index(), 0);
     }
@@ -163,7 +159,7 @@ mod tests {
     fn removing_out_of_range_does_nothing() {
         let mut tabs = tabs(&["a", "b"], 1);
         assert_eq!(tabs.remove(2), None);
-        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs.iter().count(), 2);
         assert_eq!(tabs.active(), Some(&"b"));
     }
 

@@ -2,20 +2,12 @@ mod font;
 mod tabs;
 mod terminal;
 mod terminal_view;
+mod workspace_view;
 
 use gpui::{App, Application, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
 
-use terminal::size::GridSize;
 use terminal::{SpawnOptions, Terminal};
-use terminal_view::TerminalView;
-
-/// 起動直後の仮サイズ。最初の描画で表示領域に合わせてリサイズされる。
-const INITIAL_SIZE: GridSize = GridSize {
-    cols: 80,
-    rows: 24,
-    cell_width: 8.0,
-    cell_height: 18.0,
-};
+use workspace_view::{INITIAL_SIZE, WorkspaceView};
 
 fn main() {
     // TERM / COLORTERM を設定する（内部で set_var を呼ぶため、スレッド生成前に一度だけ呼ぶ）
@@ -36,7 +28,7 @@ fn main() {
             ..Default::default()
         };
         let opened = cx.open_window(options, |window, cx| {
-            cx.new(|cx| TerminalView::new(terminal, events, window, cx))
+            cx.new(|cx| WorkspaceView::new(terminal, events, window, cx))
         });
         if let Err(err) = opened {
             eprintln!("failed to open window: {err:#}");

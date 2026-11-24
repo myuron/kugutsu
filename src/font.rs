@@ -15,11 +15,8 @@ const PREFERRED_MONOSPACE: &[&str] = &[
     "Consolas",
 ];
 
-/// 候補が一つも無いときのフォールバック。
-pub const FALLBACK_FAMILY: &str = "monospace";
-
-/// インストール済みのフォント名から、ターミナルに使う等幅フォントを選ぶ。
-pub fn choose_monospace_family(available: &[String]) -> String {
+/// インストール済みのフォント名から、ターミナルに使う等幅フォントを選ぶ。見つからなければ `None`。
+pub fn choose_monospace_family(available: &[String]) -> Option<String> {
     let installed = |name: &str| available.iter().any(|a| a == name);
     PREFERRED_MONOSPACE
         .iter()
@@ -31,8 +28,7 @@ pub fn choose_monospace_family(available: &[String]) -> String {
                 .map(String::as_str)
                 .find(|name| name.ends_with(" Mono"))
         })
-        .unwrap_or(FALLBACK_FAMILY)
-        .to_string()
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -46,32 +42,38 @@ mod tests {
     #[test]
     fn picks_most_preferred_installed_font() {
         let available = names(&["Noto Sans", "DejaVu Sans Mono", "JetBrains Mono"]);
-        assert_eq!(choose_monospace_family(&available), "JetBrains Mono");
+        assert_eq!(
+            choose_monospace_family(&available).as_deref(),
+            Some("JetBrains Mono")
+        );
     }
 
     #[test]
     fn skips_fonts_that_are_not_installed() {
         let available = names(&["Noto Sans", "DejaVu Sans Mono"]);
-        assert_eq!(choose_monospace_family(&available), "DejaVu Sans Mono");
+        assert_eq!(
+            choose_monospace_family(&available).as_deref(),
+            Some("DejaVu Sans Mono")
+        );
     }
 
     #[test]
     fn falls_back_to_any_mono_named_font() {
         let available = names(&["Noto Sans", "Some Mono"]);
-        assert_eq!(choose_monospace_family(&available), "Some Mono");
+        assert_eq!(
+            choose_monospace_family(&available).as_deref(),
+            Some("Some Mono")
+        );
     }
 
     #[test]
     fn does_not_pick_proportional_variants() {
         let available = names(&["JetBrainsMono Nerd Font Propo", "Noto Sans"]);
-        assert_eq!(choose_monospace_family(&available), FALLBACK_FAMILY);
+        assert_eq!(choose_monospace_family(&available), None);
     }
 
     #[test]
     fn falls_back_when_nothing_matches() {
-        assert_eq!(
-            choose_monospace_family(&names(&["Noto Sans"])),
-            FALLBACK_FAMILY
-        );
+        assert_eq!(choose_monospace_family(&names(&["Noto Sans"])), None);
     }
 }

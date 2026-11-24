@@ -1,58 +1,95 @@
 //! gpui でターミナルを描画・操作するビュー。
 
-use std::ops::Range;
-
 use alacritty_terminal::event::Event;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    Context, FocusHandle, Focusable, Font, FontStyle, FontWeight, HighlightStyle, KeyDownEvent,
-    Pixels, Render, StyledText, Task, UnderlineStyle, Window, div, font, prelude::*, px, rgb,
+    App, Bounds, Context, FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight, Hsla,
+    KeyDownEvent, Pixels, Render, StrikethroughStyle, Task, TextRun, UnderlineStyle, Window,
+    canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
 
-use crate::terminal::content::Row;
+use crate::terminal::content::{Snapshot, Style};
 use crate::terminal::size::GridSize;
-use crate::terminal::{SpawnOptions, Terminal, colors, keys};
+use crate::terminal::{Terminal, TerminalEvent, colors, keys};
 
 const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT_RATIO: f32 = 1.3;
 const PADDING: f32 = 4.0;
+const CURSOR_OPACITY: f32 = 0.6;
+const DEFAULT_TITLE: &str = "kugutsu";
+/// 等幅フォントが見つからないときに gpui へ渡すファミリー名。
+const FALLBACK_FONT_FAMILY: &str = "monospace";
 
+// TODO: IME（日本語入力）対応。EntityInputHandler を実装して確定文字列を PTY に書き込む。
 pub struct TerminalView {
     terminal: Terminal,
     focus_handle: FocusHandle,
-    font: Font,
-    cell_width: Pixels,
-    cell_height: Pixels,
+    metrics: CellMetrics,
     _events: Task<()>,
 }
 
-impl TerminalView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> anyhow::Result<Self> {
+/// セル格子の描画に使うフォントとセルサイズ。
+#[derive(Clone)]
+struct CellMetrics {
+    font: Font,
+    font_size: Pixels,
+    cell_width: Pixels,
+    cell_height: Pixels,
+}
+
+impl CellMetrics {
+    fn measure(window: &Window) -> Self {
         let text_system = window.text_system();
-        let font = font(crate::font::choose_monospace_family(
-            &text_system.all_font_names(),
-        ));
+        let family = crate::font::choose_monospace_family(&text_system.all_font_names())
+            .unwrap_or_else(|| {
+                eprintln!("warning: no monospace font found; terminal cells may be misaligned");
+                FALLBACK_FONT_FAMILY.to_string()
+            });
+        let font = Font {
+            // 合字（-> や != など）はセル格子を崩すので無効にする
+            features: FontFeatures::disable_ligatures(),
+            ..font(family)
+        };
         let font_size = px(FONT_SIZE);
         let font_id = text_system.resolve_font(&font);
-        let cell_width = text_system.advance(font_id, font_size, 'm')?.width;
-        let cell_height = (font_size * LINE_HEIGHT_RATIO).round();
+        let cell_width = text_system
+            .advance(font_id, font_size, 'm')
+            .map(|advance| advance.width)
+            .unwrap_or(font_size * 0.6);
+        Self {
+            font,
+            font_size,
+            cell_width,
+            cell_height: (font_size * LINE_HEIGHT_RATIO).round(),
+        }
+    }
 
-        let viewport = window.viewport_size();
-        let size = grid_size(viewport.width, viewport.height, cell_width, cell_height);
-        let (terminal, events) = Terminal::spawn(SpawnOptions::default(), size)?;
+    fn grid_size(&self, bounds: Bounds<Pixels>) -> GridSize {
+        GridSize::from_pixels(
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+            f32::from(self.cell_width),
+            f32::from(self.cell_height),
+        )
+    }
+}
 
+impl TerminalView {
+    pub fn new(
+        terminal: Terminal,
+        events: UnboundedReceiver<Event>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
         window.focus(&focus_handle);
-
-        Ok(Self {
+        Self {
             terminal,
             focus_handle,
-            font,
-            cell_width,
-            cell_height,
+            metrics: CellMetrics::measure(window),
             _events: Self::handle_events(events, window, cx),
-        })
+        }
     }
 
     fn handle_events(
@@ -62,27 +99,22 @@ impl TerminalView {
     ) -> Task<()> {
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
+                let Ok(event) = this.update(cx, |view, _| view.terminal.handle_event(event)) else {
+                    break;
+                };
                 let result = match event {
-                    Event::Wakeup => this.update(cx, |_, cx| cx.notify()),
-                    Event::PtyWrite(text) => {
-                        this.update(cx, |view, _| view.terminal.write(text.into_bytes()))
+                    None => Ok(()),
+                    Some(TerminalEvent::Wakeup) => this.update(cx, |_, cx| cx.notify()),
+                    Some(TerminalEvent::Title(title)) => {
+                        cx.update(|window, _| window.set_window_title(&title))
                     }
-                    // fish などは起動時に色を問い合わせ、応答を待つので必ず返す
-                    Event::ColorRequest(index, format) => this.update(cx, |view, _| {
-                        if let Some(rgb) = colors::index_to_rgb(index) {
-                            view.terminal.write(format(rgb).into_bytes());
-                        }
-                    }),
-                    Event::TextAreaSizeRequest(format) => this.update(cx, |view, _| {
-                        let size = view.terminal.size().window_size();
-                        view.terminal.write(format(size).into_bytes());
-                    }),
-                    Event::Title(title) => cx.update(|window, _| window.set_window_title(&title)),
-                    Event::Exit => {
+                    Some(TerminalEvent::ResetTitle) => {
+                        cx.update(|window, _| window.set_window_title(DEFAULT_TITLE))
+                    }
+                    Some(TerminalEvent::Exit) => {
                         let _ = cx.update(|window, _| window.remove_window());
                         break;
                     }
-                    _ => Ok(()),
                 };
                 if result.is_err() {
                     break;
@@ -92,50 +124,27 @@ impl TerminalView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let app_cursor = self.terminal.snapshot().app_cursor;
-        if let Some(bytes) = keys::keystroke_to_bytes(&event.keystroke, app_cursor) {
+        if let Some(bytes) = keys::keystroke_to_bytes(&event.keystroke, self.terminal.app_cursor())
+        {
             self.terminal.write(bytes);
             cx.stop_propagation();
         }
     }
 }
 
-fn grid_size(width: Pixels, height: Pixels, cell_width: Pixels, cell_height: Pixels) -> GridSize {
-    GridSize::from_pixels(
-        f32::from(width) - PADDING * 2.0,
-        f32::from(height) - PADDING * 2.0,
-        f32::from(cell_width),
-        f32::from(cell_height),
-    )
-}
-
 impl Focusable for TerminalView {
-    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
 impl Render for TerminalView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let viewport = window.viewport_size();
-        self.terminal.resize(grid_size(
-            viewport.width,
-            viewport.height,
-            self.cell_width,
-            self.cell_height,
-        ));
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let snapshot = self.terminal.snapshot();
-
-        let cursor = snapshot.cursor.map(|cursor| {
-            div()
-                .absolute()
-                .left(self.cell_width * cursor.col as f32)
-                .top(self.cell_height * cursor.row as f32)
-                .w(self.cell_width)
-                .h(self.cell_height)
-                .bg(rgb(colors::CURSOR))
-                .opacity(0.6)
-        });
+        let current_size = self.terminal.size();
+        let view = cx.entity().downgrade();
+        let prepaint_metrics = self.metrics.clone();
+        let paint_metrics = self.metrics.clone();
 
         div()
             .id("terminal")
@@ -144,103 +153,164 @@ impl Render for TerminalView {
             .size_full()
             .p(px(PADDING))
             .bg(rgb(colors::DEFAULT_BACKGROUND))
-            .text_color(rgb(colors::DEFAULT_FOREGROUND))
-            .font(self.font.clone())
-            .text_size(px(FONT_SIZE))
-            .line_height(self.cell_height)
             .child(
-                div()
-                    .relative()
-                    .children(snapshot.rows.iter().map(|row| {
-                        div().h(self.cell_height).whitespace_nowrap().child(
-                            StyledText::new(row.text.clone()).with_highlights(row_highlights(row)),
-                        )
-                    }))
-                    .children(cursor),
+                canvas(
+                    // 要素自身の大きさからグリッドサイズを決め、変わっていれば PTY をリサイズして再描画する
+                    move |bounds, _, cx| {
+                        let size = prepaint_metrics.grid_size(bounds);
+                        if size != current_size {
+                            let _ = view.update(cx, |view, cx| {
+                                view.terminal.resize(size);
+                                cx.notify();
+                            });
+                        }
+                    },
+                    move |bounds, (), window, cx| {
+                        paint_snapshot(&snapshot, &paint_metrics, bounds, window, cx)
+                    },
+                )
+                .size_full(),
             )
     }
 }
 
-/// 行の Run を gpui の StyledText 用ハイライトに変換する。
-fn row_highlights(row: &Row) -> Vec<(Range<usize>, HighlightStyle)> {
-    let mut start = 0;
-    row.runs
-        .iter()
-        .map(|run| {
-            let range = start..start + run.len;
-            start = range.end;
-            let style = HighlightStyle {
-                color: Some(rgb(run.fg).into()),
-                background_color: Some(rgb(run.bg).into()),
-                font_weight: run.bold.then_some(FontWeight::BOLD),
-                font_style: run.italic.then_some(FontStyle::Italic),
-                underline: run.underline.then(|| UnderlineStyle {
-                    thickness: px(1.0),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            (range, style)
-        })
-        .collect()
+/// スナップショットをセル格子に沿って描画する。
+fn paint_snapshot(
+    snapshot: &Snapshot,
+    metrics: &CellMetrics,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let CellMetrics {
+        cell_width,
+        cell_height,
+        ..
+    } = *metrics;
+    let cell_origin = |row: usize, col: usize| {
+        point(
+            bounds.origin.x + cell_width * col as f32,
+            bounds.origin.y + cell_height * row as f32,
+        )
+    };
+
+    for (row_index, row) in snapshot.rows.iter().enumerate() {
+        for segment in &row.segments {
+            let origin = cell_origin(row_index, segment.col);
+            if segment.style.bg != colors::DEFAULT_BACKGROUND {
+                let area =
+                    Bounds::new(origin, size(cell_width * segment.cells as f32, cell_height));
+                window.paint_quad(fill(area, rgb(segment.style.bg)));
+            }
+            if is_blank(&segment.text, &segment.style) {
+                continue;
+            }
+            let run = text_run(&segment.style, segment.text.len(), &metrics.font);
+            // 半角の連続区間はグリフ送り幅をセル幅に固定し、フォールバックグリフでも格子からずれないようにする
+            let force_width = segment.monospaced.then_some(cell_width);
+            let line = window.text_system().shape_line(
+                segment.text.clone().into(),
+                metrics.font_size,
+                &[run],
+                force_width,
+            );
+            let _ = line.paint(origin, cell_height, window, cx);
+        }
+    }
+
+    if let Some(cursor) = snapshot.cursor {
+        let area = Bounds::new(
+            cell_origin(cursor.row, cursor.col),
+            size(cell_width * cursor.cells as f32, cell_height),
+        );
+        let mut color: Hsla = rgb(colors::CURSOR).into();
+        color.a = CURSOR_OPACITY;
+        window.paint_quad(fill(area, color));
+    }
+}
+
+/// 描画しても見た目が変わらない区間（空白のみで線の装飾も無い）か。
+fn is_blank(text: &str, style: &Style) -> bool {
+    !style.underline && !style.strikethrough && text.chars().all(|c| c == ' ')
+}
+
+/// 区間のスタイルを gpui の TextRun に変換する（背景は別途矩形で塗る）。
+fn text_run(style: &Style, len: usize, base_font: &Font) -> TextRun {
+    let color: Hsla = rgb(style.fg).into();
+    TextRun {
+        len,
+        font: Font {
+            weight: if style.bold {
+                FontWeight::BOLD
+            } else {
+                base_font.weight
+            },
+            style: if style.italic {
+                FontStyle::Italic
+            } else {
+                base_font.style
+            },
+            ..base_font.clone()
+        },
+        color,
+        background_color: None,
+        underline: style.underline.then(|| UnderlineStyle {
+            thickness: px(1.0),
+            color: Some(color),
+            wavy: false,
+        }),
+        strikethrough: style.strikethrough.then(|| StrikethroughStyle {
+            thickness: px(1.0),
+            color: Some(color),
+        }),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::content::Run;
 
-    fn run(len: usize, fg: u32, bg: u32) -> Run {
-        Run {
-            len,
-            fg,
-            bg,
-            bold: false,
-            italic: false,
-            underline: false,
-        }
+    #[test]
+    fn text_run_uses_foreground_and_length() {
+        let style = Style {
+            fg: 0x112233,
+            ..Style::default()
+        };
+        let run = text_run(&style, 5, &font("Mono"));
+        assert_eq!(run.len, 5);
+        assert_eq!(run.color, rgb(0x112233).into());
+        assert_eq!(run.background_color, None);
+        assert_eq!(run.font.weight, FontWeight::default());
+        assert_eq!(run.font.style, FontStyle::Normal);
+        assert!(run.underline.is_none() && run.strikethrough.is_none());
     }
 
     #[test]
-    fn runs_become_contiguous_byte_ranges() {
-        let row = Row {
-            text: "abあ".into(),
-            runs: vec![run(1, 0x111111, 0x222222), run(4, 0x333333, 0x444444)],
+    fn text_run_attributes() {
+        let style = Style {
+            bold: true,
+            italic: true,
+            underline: true,
+            strikethrough: true,
+            ..Style::default()
         };
-        let highlights = row_highlights(&row);
-        assert_eq!(highlights.len(), 2);
-        assert_eq!(highlights[0].0, 0..1);
-        assert_eq!(highlights[1].0, 1..5);
-        assert_eq!(highlights[0].1.color, Some(rgb(0x111111).into()));
-        assert_eq!(highlights[1].1.background_color, Some(rgb(0x444444).into()));
+        let run = text_run(&style, 1, &font("Mono"));
+        assert_eq!(run.font.family.as_ref(), "Mono");
+        assert_eq!(run.font.weight, FontWeight::BOLD);
+        assert_eq!(run.font.style, FontStyle::Italic);
+        assert!(run.underline.is_some());
+        assert!(run.strikethrough.is_some());
     }
 
     #[test]
-    fn text_attributes() {
-        let row = Row {
-            text: "a".into(),
-            runs: vec![Run {
-                bold: true,
-                italic: true,
-                underline: true,
-                ..run(1, 0, 0)
-            }],
+    fn blank_segments() {
+        let plain = Style::default();
+        assert!(is_blank("   ", &plain));
+        assert!(!is_blank(" a ", &plain));
+        let underlined = Style {
+            underline: true,
+            ..plain
         };
-        let style = row_highlights(&row)[0].1;
-        assert_eq!(style.font_weight, Some(FontWeight::BOLD));
-        assert_eq!(style.font_style, Some(FontStyle::Italic));
-        assert_eq!(style.underline.map(|u| u.thickness), Some(px(1.0)));
-    }
-
-    #[test]
-    fn plain_runs_have_no_attributes() {
-        let row = Row {
-            text: "a".into(),
-            runs: vec![run(1, 0, 0)],
-        };
-        let style = row_highlights(&row)[0].1;
-        assert_eq!(style.font_weight, None);
-        assert_eq!(style.font_style, None);
-        assert!(style.underline.is_none());
+        assert!(!is_blank("   ", &underlined));
     }
 }

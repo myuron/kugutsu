@@ -9,12 +9,13 @@ pub mod size;
 use std::borrow::Cow;
 use std::io;
 use std::sync::Arc;
+use std::thread;
 
 use alacritty_terminal::Term;
-use alacritty_terminal::event::{Event, Notify, OnResize};
+use alacritty_terminal::event::{Event, EventListener, Notify, OnResize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::Config;
+use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::tty::{self, Options, Shell};
 use futures::channel::mpsc::{self, UnboundedReceiver};
 
@@ -22,10 +23,21 @@ use content::Snapshot;
 use listener::Listener;
 use size::GridSize;
 
-/// 起動するプログラム。`None` ならユーザーのログインシェル（`$SHELL`）。
+/// 起動するプログラム。`None` なら `$SHELL`（未設定なら passwd に登録されたシェル）。
 #[derive(Debug, Clone, Default)]
 pub struct SpawnOptions {
     pub program: Option<(String, Vec<String>)>,
+}
+
+/// ビューが反応すべきターミナルのイベント。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminalEvent {
+    /// 画面内容が変わった。
+    Wakeup,
+    Title(String),
+    ResetTitle,
+    /// プロセスが終了したか、PTY の I/O スレッドが止まった。
+    Exit,
 }
 
 /// PTY と接続されたターミナル。
@@ -36,7 +48,8 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    /// PTY を作成してプログラムを起動する。返り値の受信側にはターミナルからのイベントが届く。
+    /// PTY を作成してプログラムを起動する。返り値の受信側にはターミナルからのイベントが届き、
+    /// それぞれ [`Terminal::handle_event`] に渡す必要がある。
     pub fn spawn(
         options: SpawnOptions,
         size: GridSize,
@@ -51,15 +64,24 @@ impl Terminal {
         let pty = tty::new(&pty_options, size.window_size(), 0)?;
 
         let (sender, events) = mpsc::unbounded();
-        let listener = Listener(sender);
+        let listener = Listener::new(sender);
         let term = Arc::new(FairMutex::new(Term::new(
             Config::default(),
             &size,
             listener.clone(),
         )));
-        let event_loop = EventLoop::new(term.clone(), listener, pty, true, false)?;
+        let event_loop = EventLoop::new(term.clone(), listener.clone(), pty, true, false)?;
         let notifier = Notifier(event_loop.channel());
-        event_loop.spawn();
+        let io_thread = event_loop.spawn();
+
+        // I/O スレッドは子プロセス終了時以外（I/O エラーや panic）では Exit を送らずに止まるため、
+        // 終了を監視して必ず Exit を通知する。
+        thread::Builder::new()
+            .name("PTY watcher".into())
+            .spawn(move || {
+                let _ = io_thread.join();
+                listener.send_event(Event::Exit);
+            })?;
 
         Ok((
             Self {
@@ -69,6 +91,40 @@ impl Terminal {
             },
             events,
         ))
+    }
+
+    /// alacritty からのイベントを処理する。PTY への応答が必要なもの（端末への問い合わせ）は
+    /// ここで書き戻し、ビューが反応すべきものだけを返す。
+    pub fn handle_event(&self, event: Event) -> Option<TerminalEvent> {
+        match event {
+            Event::Wakeup => Some(TerminalEvent::Wakeup),
+            Event::Title(title) => Some(TerminalEvent::Title(title)),
+            Event::ResetTitle => Some(TerminalEvent::ResetTitle),
+            Event::Exit => Some(TerminalEvent::Exit),
+            Event::PtyWrite(text) => {
+                self.write(text.into_bytes());
+                None
+            }
+            // fish などは起動時に色を問い合わせ、応答を待つので必ず返す
+            Event::ColorRequest(index, format) => {
+                let rgb = colors::index_to_rgb(index, self.term.lock().colors());
+                if let Some(rgb) = rgb {
+                    self.write(format(rgb).into_bytes());
+                }
+                None
+            }
+            Event::TextAreaSizeRequest(format) => {
+                self.write(format(self.size.window_size()).into_bytes());
+                None
+            }
+            // クリップボード連携・ベル・マウスカーソル形状は未対応
+            Event::ClipboardStore(..)
+            | Event::ClipboardLoad(..)
+            | Event::Bell
+            | Event::MouseCursorDirty
+            | Event::CursorBlinkingChange
+            | Event::ChildExit(_) => None,
+        }
     }
 
     /// PTY に入力を書き込む。
@@ -90,6 +146,11 @@ impl Terminal {
         self.size
     }
 
+    /// DECCKM（アプリケーションカーソルキーモード）が有効か。
+    pub fn app_cursor(&self) -> bool {
+        self.term.lock().mode().contains(TermMode::APP_CURSOR)
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         content::snapshot(&self.term.lock())
     }
@@ -104,10 +165,11 @@ impl Drop for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::channel::mpsc::TryRecvError;
     use std::time::{Duration, Instant};
 
     const SIZE: GridSize = GridSize {
-        cols: 20,
+        cols: 40,
         rows: 5,
         cell_width: 8.0,
         cell_height: 16.0,
@@ -119,30 +181,47 @@ mod tests {
         }
     }
 
-    /// `Exit` を受け取るまでイベントを集める。
-    fn wait_for_exit(events: &mut UnboundedReceiver<Event>) -> Vec<Event> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let mut received = Vec::new();
-        while Instant::now() < deadline {
+    /// 次のイベントを待つ。チャネルが閉じたか期限切れなら panic。
+    fn next_event(events: &mut UnboundedReceiver<Event>, deadline: Instant) -> Event {
+        loop {
             match events.try_recv() {
-                Ok(event) => {
-                    let exit = matches!(event, Event::Exit);
-                    received.push(event);
-                    if exit {
-                        return received;
-                    }
+                Ok(event) => return event,
+                Err(TryRecvError::Closed) => panic!("event channel closed"),
+                Err(TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
                 }
-                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                Err(TryRecvError::Empty) => panic!("timed out waiting for terminal event"),
             }
         }
-        panic!("terminal did not exit in time: {received:?}");
+    }
+
+    /// ビューと同じように `handle_event` でイベントを処理し、`Exit` まで進める。
+    fn run_until_exit(
+        terminal: &Terminal,
+        events: &mut UnboundedReceiver<Event>,
+    ) -> Vec<TerminalEvent> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut handled = Vec::new();
+        loop {
+            if let Some(event) = terminal.handle_event(next_event(events, deadline)) {
+                let exit = event == TerminalEvent::Exit;
+                handled.push(event);
+                if exit {
+                    return handled;
+                }
+            }
+        }
+    }
+
+    fn screen_text(terminal: &Terminal) -> String {
+        terminal.snapshot().rows.iter().map(|r| r.text()).collect()
     }
 
     #[test]
     fn renders_program_output() {
         let (terminal, mut events) = Terminal::spawn(sh("printf hello"), SIZE).unwrap();
-        wait_for_exit(&mut events);
-        assert!(terminal.snapshot().rows[0].text.starts_with("hello"));
+        run_until_exit(&terminal, &mut events);
+        assert!(terminal.snapshot().rows[0].text().starts_with("hello"));
     }
 
     #[test]
@@ -150,13 +229,8 @@ mod tests {
         let (terminal, mut events) =
             Terminal::spawn(sh("read line; printf \"got:$line\""), SIZE).unwrap();
         terminal.write(b"abc\r".as_slice());
-        wait_for_exit(&mut events);
-        let text: String = terminal
-            .snapshot()
-            .rows
-            .iter()
-            .map(|r| r.text.as_str())
-            .collect();
+        run_until_exit(&terminal, &mut events);
+        let text = screen_text(&terminal);
         assert!(text.contains("got:abc"), "{text:?}");
     }
 
@@ -164,17 +238,52 @@ mod tests {
     fn resize_updates_grid_and_pty() {
         let (mut terminal, mut events) = Terminal::spawn(sh("read _; stty size"), SIZE).unwrap();
         let bigger = GridSize {
-            cols: 30,
+            cols: 50,
             rows: 7,
             ..SIZE
         };
         terminal.resize(bigger);
         assert_eq!(terminal.size(), bigger);
         terminal.write(b"\r".as_slice());
-        wait_for_exit(&mut events);
-        let snap = terminal.snapshot();
-        assert_eq!(snap.rows.len(), 7);
-        let text: String = snap.rows.iter().map(|r| r.text.as_str()).collect();
-        assert!(text.contains("7 30"), "{text:?}");
+        run_until_exit(&terminal, &mut events);
+        assert_eq!(terminal.snapshot().rows.len(), 7);
+        let text = screen_text(&terminal);
+        assert!(text.contains("7 50"), "{text:?}");
+    }
+
+    #[test]
+    fn reports_title_changes() {
+        let (terminal, mut events) =
+            Terminal::spawn(sh("printf '\\033]2;hello\\007'"), SIZE).unwrap();
+        let handled = run_until_exit(&terminal, &mut events);
+        assert!(handled.contains(&TerminalEvent::Title("hello".into())));
+    }
+
+    #[test]
+    fn answers_color_queries_with_current_palette() {
+        // 背景色を OSC 11 で変更してから問い合わせ、返ってきた応答（24 バイト）を表示させる
+        let script = "stty raw -echo; \
+            printf '\\033]11;#ffffff\\007\\033]11;?\\007'; \
+            reply=$(dd bs=1 count=24 2>/dev/null); \
+            printf 'got:%s' \"$reply\" | tr -d '\\033\\007'";
+        let (terminal, mut events) = Terminal::spawn(sh(script), SIZE).unwrap();
+        run_until_exit(&terminal, &mut events);
+        let text = screen_text(&terminal);
+        assert!(text.contains("got:]11;rgb:ffff/ffff/ffff"), "{text:?}");
+    }
+
+    #[test]
+    fn tracks_app_cursor_mode() {
+        let (terminal, mut events) = Terminal::spawn(sh("printf '\\033[?1h'"), SIZE).unwrap();
+        run_until_exit(&terminal, &mut events);
+        assert!(terminal.app_cursor());
+    }
+
+    #[test]
+    fn dropping_terminal_reports_exit() {
+        let (terminal, mut events) = Terminal::spawn(sh("sleep 10"), SIZE).unwrap();
+        drop(terminal);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(next_event(&mut events, deadline), Event::Exit) {}
     }
 }

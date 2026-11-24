@@ -1,5 +1,6 @@
 //! ANSI カラーを 0xRRGGBB に変換する。
 
+use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 
 /// 既定の前景色。
@@ -16,19 +17,40 @@ pub const ANSI_16: [u32; 16] = [
 ];
 
 /// alacritty の `Color` を 0xRRGGBB に変換する。
-pub fn to_rgb(color: Color) -> u32 {
+///
+/// `palette` はアプリが OSC 4/10/11/12 で上書きした色（`Term::colors()`）で、設定されていれば優先する。
+pub fn to_rgb(color: Color, palette: &Colors) -> u32 {
     match color {
-        Color::Named(named) => named_to_rgb(named),
-        Color::Indexed(index) => indexed_to_rgb(index),
-        Color::Spec(Rgb { r, g, b }) => pack(r, g, b),
+        Color::Named(named) => palette[named].map_or_else(|| named_to_rgb(named), pack_rgb),
+        Color::Indexed(index) => {
+            palette[index as usize].map_or_else(|| indexed_to_rgb(index), pack_rgb)
+        }
+        Color::Spec(rgb) => pack_rgb(rgb),
     }
+}
+
+/// OSC 4/10/11/12 の問い合わせで使われる色番号（0-255: パレット, 256: 前景, 257: 背景, 258: カーソル）を RGB に変換する。
+pub fn index_to_rgb(index: usize, palette: &Colors) -> Option<Rgb> {
+    let packed = match index {
+        0..=255 => indexed_to_rgb(index as u8),
+        256 => DEFAULT_FOREGROUND,
+        257 => DEFAULT_BACKGROUND,
+        258 => CURSOR,
+        _ => return None,
+    };
+    Some(palette[index].unwrap_or_else(|| unpack(packed)))
+}
+
+/// SGR 2 (DIM) 用に各チャンネルを 2/3 に暗くする。
+pub fn dim(rgb: u32) -> u32 {
+    let scale = |shift: u32| ((rgb >> shift & 0xff) * 2 / 3) << shift;
+    scale(16) | scale(8) | scale(0)
 }
 
 fn named_to_rgb(named: NamedColor) -> u32 {
     match named {
-        NamedColor::Foreground | NamedColor::BrightForeground | NamedColor::DimForeground => {
-            DEFAULT_FOREGROUND
-        }
+        NamedColor::Foreground | NamedColor::BrightForeground => DEFAULT_FOREGROUND,
+        NamedColor::DimForeground => dim(DEFAULT_FOREGROUND),
         NamedColor::Background => DEFAULT_BACKGROUND,
         NamedColor::Cursor => CURSOR,
         NamedColor::DimBlack
@@ -68,92 +90,121 @@ fn pack(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) << 16 | (g as u32) << 8 | b as u32
 }
 
-/// OSC 4/10/11/12 の問い合わせで使われる色番号（0-255: パレット, 256: 前景, 257: 背景, 258: カーソル）を RGB に変換する。
-pub fn index_to_rgb(index: usize) -> Option<Rgb> {
-    let packed = match index {
-        0..=255 => indexed_to_rgb(index as u8),
-        256 => DEFAULT_FOREGROUND,
-        257 => DEFAULT_BACKGROUND,
-        258 => CURSOR,
-        _ => return None,
-    };
-    Some(Rgb {
+fn pack_rgb(Rgb { r, g, b }: Rgb) -> u32 {
+    pack(r, g, b)
+}
+
+fn unpack(packed: u32) -> Rgb {
+    Rgb {
         r: (packed >> 16) as u8,
         g: (packed >> 8) as u8,
         b: packed as u8,
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alacritty_terminal::term::color::Colors;
+
+    fn rgb_of(color: Color) -> u32 {
+        to_rgb(color, &Colors::default())
+    }
+
+    #[test]
+    fn palette_overrides_take_precedence() {
+        let mut palette = Colors::default();
+        palette[1] = Some(unpack(0x010203));
+        palette[NamedColor::Background] = Some(unpack(0xffffff));
+        assert_eq!(to_rgb(Color::Named(NamedColor::Red), &palette), 0x010203);
+        assert_eq!(to_rgb(Color::Indexed(1), &palette), 0x010203);
+        assert_eq!(
+            to_rgb(Color::Named(NamedColor::Background), &palette),
+            0xffffff
+        );
+        assert_eq!(index_to_rgb(257, &palette), Some(unpack(0xffffff)));
+        assert_eq!(index_to_rgb(2, &palette), Some(unpack(ANSI_16[2])));
+    }
+
+    #[test]
+    fn dim_darkens_each_channel() {
+        assert_eq!(dim(0xccccff), 0x8888aa);
+        assert_eq!(dim(0x000000), 0x000000);
+    }
 
     #[test]
     fn color_request_indices() {
-        let rgb = |v: u32| Rgb {
-            r: (v >> 16) as u8,
-            g: (v >> 8) as u8,
-            b: v as u8,
-        };
-        assert_eq!(index_to_rgb(1), Some(rgb(ANSI_16[1])));
-        assert_eq!(index_to_rgb(196), Some(rgb(0xff0000)));
-        assert_eq!(index_to_rgb(256), Some(rgb(DEFAULT_FOREGROUND)));
-        assert_eq!(index_to_rgb(257), Some(rgb(DEFAULT_BACKGROUND)));
-        assert_eq!(index_to_rgb(258), Some(rgb(CURSOR)));
-        assert_eq!(index_to_rgb(300), None);
+        assert_eq!(
+            index_to_rgb(1, &Colors::default()),
+            Some(unpack(ANSI_16[1]))
+        );
+        assert_eq!(
+            index_to_rgb(196, &Colors::default()),
+            Some(unpack(0xff0000))
+        );
+        assert_eq!(
+            index_to_rgb(256, &Colors::default()),
+            Some(unpack(DEFAULT_FOREGROUND))
+        );
+        assert_eq!(
+            index_to_rgb(257, &Colors::default()),
+            Some(unpack(DEFAULT_BACKGROUND))
+        );
+        assert_eq!(index_to_rgb(258, &Colors::default()), Some(unpack(CURSOR)));
+        assert_eq!(index_to_rgb(300, &Colors::default()), None);
     }
 
     #[test]
     fn named_ansi_colors_use_palette() {
-        assert_eq!(to_rgb(Color::Named(NamedColor::Black)), ANSI_16[0]);
-        assert_eq!(to_rgb(Color::Named(NamedColor::Red)), ANSI_16[1]);
-        assert_eq!(to_rgb(Color::Named(NamedColor::White)), ANSI_16[7]);
-        assert_eq!(to_rgb(Color::Named(NamedColor::BrightRed)), ANSI_16[9]);
-        assert_eq!(to_rgb(Color::Named(NamedColor::BrightWhite)), ANSI_16[15]);
+        assert_eq!(rgb_of(Color::Named(NamedColor::Black)), ANSI_16[0]);
+        assert_eq!(rgb_of(Color::Named(NamedColor::Red)), ANSI_16[1]);
+        assert_eq!(rgb_of(Color::Named(NamedColor::White)), ANSI_16[7]);
+        assert_eq!(rgb_of(Color::Named(NamedColor::BrightRed)), ANSI_16[9]);
+        assert_eq!(rgb_of(Color::Named(NamedColor::BrightWhite)), ANSI_16[15]);
     }
 
     #[test]
     fn dim_colors_map_to_normal_colors() {
-        assert_eq!(to_rgb(Color::Named(NamedColor::DimGreen)), ANSI_16[2]);
+        assert_eq!(rgb_of(Color::Named(NamedColor::DimGreen)), ANSI_16[2]);
     }
 
     #[test]
     fn default_colors() {
         assert_eq!(
-            to_rgb(Color::Named(NamedColor::Foreground)),
+            rgb_of(Color::Named(NamedColor::Foreground)),
             DEFAULT_FOREGROUND
         );
         assert_eq!(
-            to_rgb(Color::Named(NamedColor::Background)),
+            rgb_of(Color::Named(NamedColor::Background)),
             DEFAULT_BACKGROUND
         );
-        assert_eq!(to_rgb(Color::Named(NamedColor::Cursor)), CURSOR);
+        assert_eq!(rgb_of(Color::Named(NamedColor::Cursor)), CURSOR);
     }
 
     #[test]
     fn indexed_low_colors_use_palette() {
-        assert_eq!(to_rgb(Color::Indexed(1)), ANSI_16[1]);
-        assert_eq!(to_rgb(Color::Indexed(15)), ANSI_16[15]);
+        assert_eq!(rgb_of(Color::Indexed(1)), ANSI_16[1]);
+        assert_eq!(rgb_of(Color::Indexed(15)), ANSI_16[15]);
     }
 
     #[test]
     fn indexed_color_cube() {
-        assert_eq!(to_rgb(Color::Indexed(16)), 0x000000);
-        assert_eq!(to_rgb(Color::Indexed(196)), 0xff0000);
-        assert_eq!(to_rgb(Color::Indexed(67)), 0x5f87af);
-        assert_eq!(to_rgb(Color::Indexed(231)), 0xffffff);
+        assert_eq!(rgb_of(Color::Indexed(16)), 0x000000);
+        assert_eq!(rgb_of(Color::Indexed(196)), 0xff0000);
+        assert_eq!(rgb_of(Color::Indexed(67)), 0x5f87af);
+        assert_eq!(rgb_of(Color::Indexed(231)), 0xffffff);
     }
 
     #[test]
     fn indexed_grayscale() {
-        assert_eq!(to_rgb(Color::Indexed(232)), 0x080808);
-        assert_eq!(to_rgb(Color::Indexed(255)), 0xeeeeee);
+        assert_eq!(rgb_of(Color::Indexed(232)), 0x080808);
+        assert_eq!(rgb_of(Color::Indexed(255)), 0xeeeeee);
     }
 
     #[test]
     fn true_color() {
         assert_eq!(
-            to_rgb(Color::Spec(Rgb {
+            rgb_of(Color::Spec(Rgb {
                 r: 0x12,
                 g: 0x34,
                 b: 0x56

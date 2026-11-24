@@ -2891,6 +2891,7 @@ name = "kugutsu"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "anyhow",
  "futures",
  "gpui",
 ]

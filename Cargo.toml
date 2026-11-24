@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 alacritty_terminal = "0.25"
+anyhow = "1.0.105"
 futures = "0.3.34"
 gpui = "0.2.2"
 

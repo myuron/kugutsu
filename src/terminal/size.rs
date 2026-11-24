@@ -34,7 +34,7 @@ impl GridSize {
 }
 
 fn cells_fitting(length: f32, cell: f32) -> u16 {
-    if !(cell > 0.0) || !length.is_finite() {
+    if cell.is_nan() || cell <= 0.0 || !length.is_finite() {
         return 1;
     }
     (length / cell).floor().clamp(1.0, u16::MAX as f32) as u16

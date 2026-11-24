@@ -410,9 +410,15 @@ impl WorkspaceView {
             .border_r_1()
             .border_color(rgb(BAR_BORDER))
             .child(
+                // タブバーと高さ・下線を揃える
                 div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .h(px(TAB_BAR_HEIGHT))
                     .px(px(10.0))
-                    .py(px(6.0))
+                    .border_b_1()
+                    .border_color(rgb(BAR_BORDER))
                     .text_color(rgb(INACTIVE_TAB_FOREGROUND))
                     .child("AGENTS"),
             )
@@ -508,7 +514,6 @@ impl Render for WorkspaceView {
             .flex_col()
             .bg(rgb(colors::DEFAULT_BACKGROUND))
             .capture_key_down(cx.listener(Self::on_key_down))
-            .child(self.render_tab_bar(cx))
             .child(
                 div()
                     .flex()
@@ -516,13 +521,21 @@ impl Render for WorkspaceView {
                     .flex_1()
                     .min_h(px(0.0))
                     .children(self.sidebar_visible.then(|| self.render_sidebar(cx)))
+                    // タブバーはターミナル領域の上にだけ置く
                     .child(
                         div()
+                            .flex()
+                            .flex_col()
                             .flex_1()
                             .min_w(px(0.0))
-                            .h_full()
-                            .overflow_hidden()
-                            .children(self.render_panes(cx)),
+                            .child(self.render_tab_bar(cx))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.0))
+                                    .overflow_hidden()
+                                    .children(self.render_panes(cx)),
+                            ),
                     ),
             )
             .child(self.render_status_line())

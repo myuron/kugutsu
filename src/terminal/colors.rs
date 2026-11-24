@@ -68,9 +68,40 @@ fn pack(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) << 16 | (g as u32) << 8 | b as u32
 }
 
+/// OSC 4/10/11/12 の問い合わせで使われる色番号（0-255: パレット, 256: 前景, 257: 背景, 258: カーソル）を RGB に変換する。
+pub fn index_to_rgb(index: usize) -> Option<Rgb> {
+    let packed = match index {
+        0..=255 => indexed_to_rgb(index as u8),
+        256 => DEFAULT_FOREGROUND,
+        257 => DEFAULT_BACKGROUND,
+        258 => CURSOR,
+        _ => return None,
+    };
+    Some(Rgb {
+        r: (packed >> 16) as u8,
+        g: (packed >> 8) as u8,
+        b: packed as u8,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_request_indices() {
+        let rgb = |v: u32| Rgb {
+            r: (v >> 16) as u8,
+            g: (v >> 8) as u8,
+            b: v as u8,
+        };
+        assert_eq!(index_to_rgb(1), Some(rgb(ANSI_16[1])));
+        assert_eq!(index_to_rgb(196), Some(rgb(0xff0000)));
+        assert_eq!(index_to_rgb(256), Some(rgb(DEFAULT_FOREGROUND)));
+        assert_eq!(index_to_rgb(257), Some(rgb(DEFAULT_BACKGROUND)));
+        assert_eq!(index_to_rgb(258), Some(rgb(CURSOR)));
+        assert_eq!(index_to_rgb(300), None);
+    }
 
     #[test]
     fn named_ansi_colors_use_palette() {

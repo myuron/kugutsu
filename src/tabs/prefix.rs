@@ -3,7 +3,7 @@
 //! prefix を押すと次の 1 キーを操作として解釈する。prefix を 2 回押すと prefix 自体を
 //! ターミナルへ送る。割り当ての無いキーは捨てる。
 
-use gpui::{Keystroke, Modifiers};
+use gpui::Keystroke;
 
 use crate::panes::{Axis, Direction};
 
@@ -30,6 +30,70 @@ pub enum Command {
     NewWorkspace,
     NextWorkspace,
     PrevWorkspace,
+    /// キーマップの一覧を表示する。
+    ShowKeymap,
+}
+
+impl Command {
+    /// キーマップ一覧に表示する説明。
+    pub fn description(self) -> &'static str {
+        match self {
+            Command::NewTab => "New tab",
+            Command::NextTab => "Next tab",
+            Command::PrevTab => "Previous tab",
+            Command::SelectTab(_) => "Select tab N",
+            Command::Split(Axis::Horizontal) => "Split pane left / right",
+            Command::Split(Axis::Vertical) => "Split pane top / bottom",
+            Command::Focus(Direction::Left) => "Focus left pane",
+            Command::Focus(Direction::Down) => "Focus pane below",
+            Command::Focus(Direction::Up) => "Focus pane above",
+            Command::Focus(Direction::Right) => "Focus right pane",
+            Command::ClosePane => "Close pane",
+            Command::ToggleSidebar => "Toggle agent sidebar",
+            Command::NewWorkspace => "New workspace",
+            Command::NextWorkspace => "Next workspace",
+            Command::PrevWorkspace => "Previous workspace",
+            Command::ShowKeymap => "Show key bindings",
+        }
+    }
+}
+
+/// prefix の後のキー（gpui のキーストローク表記）と操作の対応。
+/// 数字キーによるタブ選択（`SelectTab`）だけは範囲なので `command_for` で別に扱う。
+const KEYS: &[(&str, Command)] = &[
+    ("c", Command::NewTab),
+    ("n", Command::NextTab),
+    ("p", Command::PrevTab),
+    ("v", Command::Split(Axis::Horizontal)),
+    ("s", Command::Split(Axis::Vertical)),
+    ("h", Command::Focus(Direction::Left)),
+    ("j", Command::Focus(Direction::Down)),
+    ("k", Command::Focus(Direction::Up)),
+    ("l", Command::Focus(Direction::Right)),
+    ("x", Command::ClosePane),
+    ("b", Command::ToggleSidebar),
+    ("shift-c", Command::NewWorkspace),
+    ("shift-n", Command::NextWorkspace),
+    ("shift-p", Command::PrevWorkspace),
+    ("?", Command::ShowKeymap),
+];
+
+/// キーマップ一覧に表示する（キー操作, 説明）の組。
+pub fn bindings() -> Vec<(String, &'static str)> {
+    let mut bindings: Vec<_> = KEYS
+        .iter()
+        .map(|&(key, command)| (format!("{PREFIX} {key}"), command.description()))
+        .collect();
+    // タブ切り替えの行の後ろに並べる
+    let select_tab = KEYS
+        .iter()
+        .position(|&(_, command)| command == Command::PrevTab)
+        .map_or(bindings.len(), |index| index + 1);
+    bindings.insert(
+        select_tab,
+        (format!("{PREFIX} 1-9"), Command::SelectTab(0).description()),
+    );
+    bindings
 }
 
 /// キー入力をどう扱うか。
@@ -72,40 +136,26 @@ impl PrefixKeymap {
 
 /// prefix の後に押されたキーに対応する操作。
 fn command_for(keystroke: &Keystroke) -> Option<Command> {
-    if keystroke.modifiers == Modifiers::shift() {
-        return match keystroke.key.as_str() {
-            "c" => Some(Command::NewWorkspace),
-            "n" => Some(Command::NextWorkspace),
-            "p" => Some(Command::PrevWorkspace),
-            _ => None,
-        };
+    if let Some(&(_, command)) = KEYS.iter().find(|(key, _)| matches(keystroke, key)) {
+        return Some(command);
     }
     if keystroke.modifiers.modified() {
         return None;
     }
-    let command = match keystroke.key.as_str() {
-        "c" => Command::NewTab,
-        "n" => Command::NextTab,
-        "p" => Command::PrevTab,
-        "v" => Command::Split(Axis::Horizontal),
-        "s" => Command::Split(Axis::Vertical),
-        "h" => Command::Focus(Direction::Left),
-        "j" => Command::Focus(Direction::Down),
-        "k" => Command::Focus(Direction::Up),
-        "l" => Command::Focus(Direction::Right),
-        "x" => Command::ClosePane,
-        "b" => Command::ToggleSidebar,
-        key => match key.parse::<usize>() {
-            Ok(number @ 1..=9) => Command::SelectTab(number - 1),
-            _ => return None,
-        },
-    };
-    Some(command)
+    match keystroke.key.parse::<usize>() {
+        Ok(number @ 1..=9) => Some(Command::SelectTab(number - 1)),
+        _ => None,
+    }
 }
 
 fn is_prefix(keystroke: &Keystroke) -> bool {
-    let prefix = Keystroke::parse(PREFIX).expect("PREFIX is a valid keystroke");
-    keystroke.key == prefix.key && keystroke.modifiers == prefix.modifiers
+    matches(keystroke, PREFIX)
+}
+
+/// `keystroke` が gpui 表記の `expected` と同じキー・修飾キーか。
+fn matches(keystroke: &Keystroke, expected: &str) -> bool {
+    let expected = Keystroke::parse(expected).expect("key binding is a valid keystroke");
+    keystroke.key == expected.key && keystroke.modifiers == expected.modifiers
 }
 
 #[cfg(test)]
@@ -151,6 +201,7 @@ mod tests {
             ("shift-c", Command::NewWorkspace),
             ("shift-n", Command::NextWorkspace),
             ("shift-p", Command::PrevWorkspace),
+            ("?", Command::ShowKeymap),
         ];
         for (key, command) in cases {
             let mut keymap = PrefixKeymap::default();
@@ -187,6 +238,31 @@ mod tests {
         press(&mut keymap, PREFIX);
         assert_eq!(press(&mut keymap, "escape"), KeyOutcome::Consumed);
         assert!(!keymap.is_armed());
+    }
+
+    #[test]
+    fn listed_bindings_trigger_their_commands() {
+        for &(key, command) in KEYS {
+            let mut keymap = PrefixKeymap::default();
+            press(&mut keymap, PREFIX);
+            assert_eq!(
+                press(&mut keymap, key),
+                KeyOutcome::Command(command),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn bindings_list_every_key_with_prefix() {
+        let bindings = bindings();
+        assert_eq!(bindings.len(), KEYS.len() + 1);
+        assert!(bindings.contains(&("ctrl-b ?".to_string(), "Show key bindings")));
+        assert!(bindings.contains(&("ctrl-b 1-9".to_string(), "Select tab N")));
+        for (keys, description) in &bindings {
+            assert!(keys.starts_with("ctrl-b "), "{keys}");
+            assert!(!description.is_empty(), "{keys}");
+        }
     }
 
     #[test]

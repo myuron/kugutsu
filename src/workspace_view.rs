@@ -5,7 +5,7 @@ use alacritty_terminal::event::Event;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
     AnyElement, Context, Entity, Focusable, KeyDownEvent, MouseButton, Render, ScrollHandle,
-    SharedString, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb,
+    SharedString, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb, rgba,
 };
 
 use std::time::Duration;
@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::agents::AgentState;
 use crate::panes::{Axis, Node, PaneId, Panes};
 use crate::tabs::Tabs;
-use crate::tabs::prefix::{Command, KeyOutcome, PREFIX, PrefixKeymap};
+use crate::tabs::prefix::{Command, KeyOutcome, PREFIX, PrefixKeymap, bindings};
 use crate::terminal::size::GridSize;
 use crate::terminal::{SpawnOptions, Terminal, colors};
 use crate::terminal_view::{TerminalView, TerminalViewEvent};
@@ -48,6 +48,10 @@ const AGENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const WORKING_COLOR: u32 = 0x569cd6;
 const BLOCKED_COLOR: u32 = 0xe5c07b;
 const DONE_COLOR: u32 = 0x89d185;
+/// キーマップ一覧の後ろに敷く半透明の背景（RGBA）。
+const KEYMAP_BACKDROP: u32 = 0x000000aa;
+/// キーマップ一覧のキー列の幅。
+const KEYMAP_KEY_COLUMN_WIDTH: f32 = 110.0;
 
 struct Pane {
     view: Entity<TerminalView>,
@@ -86,6 +90,8 @@ pub struct WorkspaceView {
     spawn_options: SpawnOptions,
     /// Agent 一覧のサイドバーを表示するか。
     sidebar_visible: bool,
+    /// キーマップ一覧のオーバーレイを表示しているか。
+    keymap_help_visible: bool,
     /// workspace ライン・タブバーの横スクロール位置。
     workspace_scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
@@ -108,6 +114,7 @@ impl WorkspaceView {
             keymap: PrefixKeymap::default(),
             spawn_options,
             sidebar_visible: true,
+            keymap_help_visible: false,
             workspace_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
             _agent_poll: Self::poll_agents(window, cx),
@@ -232,6 +239,17 @@ impl WorkspaceView {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.keymap_help_visible {
+            // 一覧の表示中はキーをターミナルにも prefix にも渡さない
+            cx.stop_propagation();
+            let keystroke = &event.keystroke;
+            if !keystroke.modifiers.modified()
+                && matches!(keystroke.key.as_str(), "escape" | "q" | "?")
+            {
+                self.close_keymap_help(cx);
+            }
+            return;
+        }
         let was_armed = self.keymap.is_armed();
         match self.keymap.handle(&event.keystroke) {
             KeyOutcome::Forward => {}
@@ -271,6 +289,7 @@ impl WorkspaceView {
             Command::NextWorkspace => self.workspaces.next(),
             Command::PrevWorkspace => self.workspaces.prev(),
             Command::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            Command::ShowKeymap => self.keymap_help_visible = true,
             Command::Focus(direction) => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.panes.focus(direction);
@@ -278,6 +297,11 @@ impl WorkspaceView {
             }
         }
         self.activate(window, cx);
+        cx.notify();
+    }
+
+    fn close_keymap_help(&mut self, cx: &mut Context<Self>) {
+        self.keymap_help_visible = false;
         cx.notify();
     }
 
@@ -594,6 +618,64 @@ impl WorkspaceView {
                 line.child(div().text_color(rgb(PREFIX_INDICATOR)).child(PREFIX))
             })
     }
+
+    /// ウィンドウ全体に重ねるキーマップ一覧。背景をクリックすると閉じる。
+    fn render_keymap_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = bindings().into_iter().map(|(keys, description)| {
+            div()
+                .flex()
+                .gap(px(16.0))
+                .child(
+                    div()
+                        .w(px(KEYMAP_KEY_COLUMN_WIDTH))
+                        .flex_none()
+                        .text_color(rgb(PREFIX_INDICATOR))
+                        .child(keys),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(colors::DEFAULT_FOREGROUND))
+                        .child(description),
+                )
+        });
+        let panel = div()
+            .id("keymap-help")
+            .debug_selector(|| "keymap-help".into())
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .p(px(16.0))
+            .text_size(px(12.0))
+            .bg(rgb(BAR_BACKGROUND))
+            .border_1()
+            .border_color(rgb(BAR_BORDER))
+            .child(
+                div()
+                    .pb(px(8.0))
+                    .text_color(rgb(INACTIVE_TAB_FOREGROUND))
+                    .child("KEY BINDINGS"),
+            )
+            .children(rows)
+            .child(
+                div()
+                    .pt(px(8.0))
+                    .text_color(rgb(INACTIVE_TAB_FOREGROUND))
+                    .child("esc / q to close"),
+            );
+        div()
+            .id("keymap-help-backdrop")
+            .debug_selector(|| "keymap-help-backdrop".into())
+            .occlude()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(KEYMAP_BACKDROP))
+            .on_click(cx.listener(|this, _, _, cx| this.close_keymap_help(cx)))
+            .child(panel)
+    }
 }
 
 /// ペイン木の節を描画する。分割は子を均等な大きさで並べ、間に境界線を引く。
@@ -655,6 +737,7 @@ fn render_node(
 impl Render for WorkspaceView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -686,6 +769,9 @@ impl Render for WorkspaceView {
                     ),
             )
             .child(self.render_status_line())
+            .when(self.keymap_help_visible, |root| {
+                root.child(self.render_keymap_help(cx))
+            })
     }
 }
 
@@ -1089,6 +1175,65 @@ mod tests {
 
         cx.simulate_keystrokes("ctrl-b b");
         assert!(workspace.read_with(cx, |workspace, _| workspace.sidebar_visible));
+    }
+
+    fn keymap_help_visible(workspace: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> bool {
+        workspace.read_with(cx, |workspace, _| workspace.keymap_help_visible)
+    }
+
+    #[gpui::test]
+    fn prefix_question_shows_keymap_help(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        assert!(!keymap_help_visible(&workspace, cx));
+        assert!(cx.debug_bounds("keymap-help").is_none());
+
+        cx.simulate_keystrokes("ctrl-b ?");
+        assert!(keymap_help_visible(&workspace, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("keymap-help").is_some());
+    }
+
+    #[gpui::test]
+    fn keymap_help_closes_with_escape_q_or_question(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        for key in ["escape", "q", "?"] {
+            cx.simulate_keystrokes("ctrl-b ?");
+            assert!(keymap_help_visible(&workspace, cx), "{key}");
+            cx.simulate_keystrokes(key);
+            assert!(!keymap_help_visible(&workspace, cx), "{key}");
+        }
+    }
+
+    #[gpui::test]
+    fn keys_are_consumed_while_keymap_help_is_open(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        cx.simulate_keystrokes("ctrl-b ?");
+        cx.simulate_keystrokes("ctrl-b c");
+        assert_eq!(active_tab_count(&workspace, cx), 1);
+        assert!(keymap_help_visible(&workspace, cx));
+    }
+
+    #[gpui::test]
+    fn clicking_backdrop_closes_keymap_help(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        cx.simulate_keystrokes("ctrl-b ?");
+        cx.run_until_parked();
+
+        // パネルの外側（背景の左上隅）をクリックする
+        let backdrop = bounds(cx, "keymap-help-backdrop");
+        let corner = backdrop.origin + gpui::point(px(5.0), px(5.0));
+        cx.simulate_click(corner, gpui::Modifiers::none());
+        assert!(!keymap_help_visible(&workspace, cx));
+    }
+
+    #[gpui::test]
+    fn clicking_keymap_help_panel_keeps_it_open(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        cx.simulate_keystrokes("ctrl-b ?");
+        cx.run_until_parked();
+
+        click(cx, "keymap-help");
+        assert!(keymap_help_visible(&workspace, cx));
     }
 
     #[test]

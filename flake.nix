@@ -39,11 +39,18 @@
           default = pkgs.callPackage ./nix/rust.nix { };
         };
         devShells = {
-          default = pkgs.mkShell {
-            packages = with pkgs; [
-              rust-bin.stable.latest.default
-            ];
-          };
+          default =
+            let
+              gpuiDeps = pkgs.callPackage ./nix/gpui-deps.nix { };
+            in
+            pkgs.mkShell {
+              packages = [
+                pkgs.rust-bin.stable.latest.default
+              ]
+              ++ gpuiDeps.nativeBuildInputs;
+              buildInputs = gpuiDeps.buildInputs;
+              LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath gpuiDeps.runtimeLibs;
+            };
         };
       };
     };

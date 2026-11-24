@@ -105,24 +105,34 @@ pub fn snapshot<T: EventListener>(term: &Term<T>) -> Snapshot {
     }
 
     let cursor = if content.mode.contains(TermMode::SHOW_CURSOR) {
-        let point = content.cursor.point;
-        usize::try_from(point.line.0 + display_offset)
-            .ok()
-            .filter(|&row| row < rows.len())
-            .map(|row| Cursor {
-                row,
-                col: point.column.0,
-                cells: if term.grid()[point].flags.contains(Flags::WIDE_CHAR) {
-                    2
-                } else {
-                    1
-                },
-            })
+        cursor_position(term)
     } else {
         None
     };
 
     Snapshot { rows, cursor }
+}
+
+/// 表示・非表示（DECTCEM）に関わらないカーソル位置。画面外（スクロールバック表示中）なら `None`。
+pub fn cursor_position<T: EventListener>(term: &Term<T>) -> Option<Cursor> {
+    let mut point = term.grid().cursor.point;
+    // 全角文字の後半セルにいる場合はその全角文字の位置とする（alacritty の描画と同じ）
+    if term.grid()[point].flags.contains(Flags::WIDE_CHAR_SPACER) {
+        point.column -= 1;
+    }
+    let display_offset = term.grid().display_offset() as i32;
+    usize::try_from(point.line.0 + display_offset)
+        .ok()
+        .filter(|&row| row < term.screen_lines())
+        .map(|row| Cursor {
+            row,
+            col: point.column.0,
+            cells: if term.grid()[point].flags.contains(Flags::WIDE_CHAR) {
+                2
+            } else {
+                1
+            },
+        })
 }
 
 /// セルを行の区間に追加する。半角セルは直前の同一スタイル区間に連結する。
@@ -361,6 +371,39 @@ mod tests {
     fn hidden_cursor() {
         let snap = snapshot_of(5, 3, b"\x1b[?25l");
         assert_eq!(snap.cursor, None);
+    }
+
+    fn term_with(cols: u16, rows: u16, bytes: &[u8]) -> Term<VoidListener> {
+        let size = GridSize {
+            cols,
+            rows,
+            cell_width: 1.0,
+            cell_height: 1.0,
+        };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        parser.advance(&mut term, bytes);
+        term
+    }
+
+    #[test]
+    fn cursor_position_is_known_while_hidden() {
+        // TUI はカーソルを隠して自前で描くが、IME の変換位置にはカーソル位置を使う
+        let term = term_with(5, 3, b"ab\r\nc\x1b[?25l");
+        assert_eq!(
+            cursor_position(&term),
+            Some(Cursor {
+                row: 1,
+                col: 1,
+                cells: 1
+            })
+        );
+    }
+
+    #[test]
+    fn cursor_position_matches_visible_cursor() {
+        let term = term_with(5, 1, "あ\x1b[1G".as_bytes());
+        assert_eq!(cursor_position(&term), snapshot(&term).cursor);
     }
 
     #[test]

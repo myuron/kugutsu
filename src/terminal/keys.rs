@@ -1,6 +1,6 @@
-//! gpui のキー入力を PTY に送るバイト列へ変換する。
+//! gpui のキー入力を PTY に送るバイト列へ変換する（xterm 互換）。
 
-use gpui::Keystroke;
+use gpui::{Keystroke, Modifiers};
 
 /// キー入力を PTY へ書き込むバイト列に変換する。
 ///
@@ -11,13 +11,21 @@ pub fn keystroke_to_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec
     if modifiers.platform {
         return None;
     }
+    let key = keystroke.key.as_str();
 
-    let bytes = if modifiers.control {
-        vec![control_byte(&keystroke.key)?]
-    } else if let Some(sequence) = special_key(&keystroke.key, modifiers.shift, app_cursor) {
-        sequence.to_vec()
-    } else {
-        keystroke.key_char.as_ref()?.as_bytes().to_vec()
+    if let Some(sequence) = csi_key(key, modifiers, app_cursor) {
+        return Some(sequence);
+    }
+
+    let bytes = match key {
+        "enter" => vec![b'\r'],
+        "tab" if modifiers.shift => b"\x1b[Z".to_vec(),
+        "tab" => vec![b'\t'],
+        "escape" => vec![0x1b],
+        "backspace" if modifiers.control => vec![0x08],
+        "backspace" => vec![0x7f],
+        _ if modifiers.control => vec![control_byte(key)?],
+        _ => keystroke.key_char.as_ref()?.as_bytes().to_vec(),
     };
 
     Some(if modifiers.alt {
@@ -27,44 +35,75 @@ pub fn keystroke_to_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec
     })
 }
 
-fn special_key(key: &str, shift: bool, app_cursor: bool) -> Option<&'static [u8]> {
-    let sequence: &[u8] = match (key, app_cursor) {
-        ("enter", _) => b"\r",
-        ("backspace", _) => b"\x7f",
-        ("tab", _) if shift => b"\x1b[Z",
-        ("tab", _) => b"\t",
-        ("escape", _) => b"\x1b",
-        ("delete", _) => b"\x1b[3~",
-        ("insert", _) => b"\x1b[2~",
-        ("pageup", _) => b"\x1b[5~",
-        ("pagedown", _) => b"\x1b[6~",
-        ("up", false) => b"\x1b[A",
-        ("down", false) => b"\x1b[B",
-        ("right", false) => b"\x1b[C",
-        ("left", false) => b"\x1b[D",
-        ("home", false) => b"\x1b[H",
-        ("end", false) => b"\x1b[F",
-        ("up", true) => b"\x1bOA",
-        ("down", true) => b"\x1bOB",
-        ("right", true) => b"\x1bOC",
-        ("left", true) => b"\x1bOD",
-        ("home", true) => b"\x1bOH",
-        ("end", true) => b"\x1bOF",
+/// xterm の修飾パラメータ（1 + Shift(1) + Alt(2) + Ctrl(4)）。修飾なしは `None`。
+fn modifier_param(modifiers: &Modifiers) -> Option<u8> {
+    let param = 1
+        + u8::from(modifiers.shift)
+        + 2 * u8::from(modifiers.alt)
+        + 4 * u8::from(modifiers.control);
+    (param > 1).then_some(param)
+}
+
+/// カーソルキー・編集キー・ファンクションキーの CSI / SS3 シーケンス。
+fn csi_key(key: &str, modifiers: &Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
+    // 末尾文字で区別するキー: CSI 1;m X / SS3 X / CSI X
+    let letter = match key {
+        "up" => Some(b'A'),
+        "down" => Some(b'B'),
+        "right" => Some(b'C'),
+        "left" => Some(b'D'),
+        "home" => Some(b'H'),
+        "end" => Some(b'F'),
+        "f1" => Some(b'P'),
+        "f2" => Some(b'Q'),
+        "f3" => Some(b'R'),
+        "f4" => Some(b'S'),
+        _ => None,
+    };
+    if let Some(letter) = letter {
+        let is_function_key = key.starts_with('f');
+        return Some(match modifier_param(modifiers) {
+            Some(param) => format!("\x1b[1;{param}{}", letter as char).into_bytes(),
+            None if is_function_key || app_cursor => vec![0x1b, b'O', letter],
+            None => vec![0x1b, b'[', letter],
+        });
+    }
+
+    // 番号で区別するキー: CSI n ~ / CSI n;m ~
+    let number = match key {
+        "insert" => 2,
+        "delete" => 3,
+        "pageup" => 5,
+        "pagedown" => 6,
+        "f5" => 15,
+        "f6" => 17,
+        "f7" => 18,
+        "f8" => 19,
+        "f9" => 20,
+        "f10" => 21,
+        "f11" => 23,
+        "f12" => 24,
         _ => return None,
     };
-    Some(sequence)
+    Some(
+        match modifier_param(modifiers) {
+            Some(param) => format!("\x1b[{number};{param}~"),
+            None => format!("\x1b[{number}~"),
+        }
+        .into_bytes(),
+    )
 }
 
 /// Ctrl+キーに対応する C0 制御文字。
 fn control_byte(key: &str) -> Option<u8> {
     match key {
         "space" | "@" | "2" => Some(0x00),
-        "[" => Some(0x1b),
-        "\\" => Some(0x1c),
-        "]" => Some(0x1d),
+        "[" | "3" => Some(0x1b),
+        "\\" | "4" => Some(0x1c),
+        "]" | "5" => Some(0x1d),
         "^" | "6" => Some(0x1e),
-        "_" | "-" => Some(0x1f),
-        "?" => Some(0x7f),
+        "_" | "-" | "/" | "7" => Some(0x1f),
+        "?" | "8" => Some(0x7f),
         _ => match key.as_bytes() {
             [c @ b'a'..=b'z'] => Some(c - b'a' + 1),
             _ => None,
@@ -165,5 +204,76 @@ mod tests {
     fn ignores_platform_modifier_and_bare_modifiers() {
         assert_eq!(keystroke_to_bytes(&typed("super-c", "c"), false), None);
         assert_eq!(bytes("shift"), None);
+    }
+
+    #[test]
+    fn modified_cursor_keys_use_xterm_parameters() {
+        assert_eq!(bytes("shift-up"), Some(b"\x1b[1;2A".to_vec()));
+        assert_eq!(bytes("alt-left"), Some(b"\x1b[1;3D".to_vec()));
+        assert_eq!(bytes("ctrl-left"), Some(b"\x1b[1;5D".to_vec()));
+        assert_eq!(bytes("ctrl-right"), Some(b"\x1b[1;5C".to_vec()));
+        assert_eq!(bytes("ctrl-shift-home"), Some(b"\x1b[1;6H".to_vec()));
+        assert_eq!(bytes("ctrl-delete"), Some(b"\x1b[3;5~".to_vec()));
+        assert_eq!(bytes("shift-pageup"), Some(b"\x1b[5;2~".to_vec()));
+    }
+
+    #[test]
+    fn modified_cursor_keys_ignore_app_cursor_mode() {
+        let ctrl_up = Keystroke::parse("ctrl-up").unwrap();
+        assert_eq!(
+            keystroke_to_bytes(&ctrl_up, true),
+            Some(b"\x1b[1;5A".to_vec())
+        );
+    }
+
+    #[test]
+    fn home_end_in_app_cursor_mode() {
+        let home = Keystroke::parse("home").unwrap();
+        assert_eq!(keystroke_to_bytes(&home, true), Some(b"\x1bOH".to_vec()));
+        let end = Keystroke::parse("end").unwrap();
+        assert_eq!(keystroke_to_bytes(&end, true), Some(b"\x1bOF".to_vec()));
+    }
+
+    #[test]
+    fn insert_key() {
+        assert_eq!(bytes("insert"), Some(b"\x1b[2~".to_vec()));
+    }
+
+    #[test]
+    fn function_keys() {
+        assert_eq!(bytes("f1"), Some(b"\x1bOP".to_vec()));
+        assert_eq!(bytes("f4"), Some(b"\x1bOS".to_vec()));
+        assert_eq!(bytes("f5"), Some(b"\x1b[15~".to_vec()));
+        assert_eq!(bytes("f10"), Some(b"\x1b[21~".to_vec()));
+        assert_eq!(bytes("f12"), Some(b"\x1b[24~".to_vec()));
+        assert_eq!(bytes("shift-f1"), Some(b"\x1b[1;2P".to_vec()));
+        assert_eq!(bytes("ctrl-f5"), Some(b"\x1b[15;5~".to_vec()));
+    }
+
+    #[test]
+    fn control_with_editing_keys() {
+        assert_eq!(bytes("ctrl-backspace"), Some(vec![0x08]));
+        assert_eq!(bytes("ctrl-enter"), Some(b"\r".to_vec()));
+        assert_eq!(bytes("ctrl-tab"), Some(b"\t".to_vec()));
+    }
+
+    #[test]
+    fn control_digits_and_slash() {
+        assert_eq!(bytes("ctrl-/"), Some(vec![0x1f]));
+        assert_eq!(bytes("ctrl-3"), Some(vec![0x1b]));
+        assert_eq!(bytes("ctrl-4"), Some(vec![0x1c]));
+        assert_eq!(bytes("ctrl-5"), Some(vec![0x1d]));
+        assert_eq!(bytes("ctrl-7"), Some(vec![0x1f]));
+        assert_eq!(bytes("ctrl-8"), Some(vec![0x7f]));
+    }
+
+    #[test]
+    fn control_alt_prefixes_escape() {
+        assert_eq!(bytes("ctrl-alt-a"), Some(vec![0x1b, 0x01]));
+    }
+
+    #[test]
+    fn unknown_control_combination_sends_nothing() {
+        assert_eq!(bytes("ctrl-f13"), None);
     }
 }

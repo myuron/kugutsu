@@ -3,6 +3,8 @@
   callPackage,
   makeRustPlatform,
   rust-bin,
+  wayland,
+  vulkan-loader,
 }:
 let
   toolchain = rust-bin.stable.latest.default;
@@ -20,11 +22,13 @@ rustPlatform.buildRustPackage {
 
   inherit (gpuiDeps) nativeBuildInputs buildInputs;
 
-  # PTY を使う統合テストは nix のビルドサンドボックスでは動かないことがあるため CI の cargo test に任せる
-  doCheck = false;
-
-  # wayland / vulkan / xkbcommon は dlopen されるので rpath に追加する
+  # wayland / vulkan は dlopen されるので rpath に追加する
   postFixup = ''
-    patchelf --add-rpath ${lib.makeLibraryPath gpuiDeps.runtimeLibs} $out/bin/kugutsu
+    patchelf --add-rpath ${
+      lib.makeLibraryPath [
+        wayland
+        vulkan-loader
+      ]
+    } $out/bin/kugutsu
   '';
 }

@@ -76,12 +76,19 @@ impl Terminal {
 
         // I/O スレッドは子プロセス終了時以外（I/O エラーや panic）では Exit を送らずに止まるため、
         // 終了を監視して必ず Exit を通知する。
-        thread::Builder::new()
+        let watcher = thread::Builder::new()
             .name("PTY watcher".into())
             .spawn(move || {
-                let _ = io_thread.join();
+                // join の戻り値（EventLoop と Pty）を破棄すると Pty の Drop が子プロセスの終了を待つため、
+                // 先に Exit を通知してから破棄する
+                let stopped = io_thread.join();
                 listener.send_event(Event::Exit);
-            })?;
+                drop(stopped);
+            });
+        if let Err(err) = watcher {
+            let _ = notifier.0.send(Msg::Shutdown);
+            return Err(err);
+        }
 
         Ok((
             Self {
@@ -284,6 +291,20 @@ mod tests {
         let (terminal, mut events) = Terminal::spawn(sh("sleep 10"), SIZE).unwrap();
         drop(terminal);
         let deadline = Instant::now() + Duration::from_secs(5);
+        while !matches!(next_event(&mut events, deadline), Event::Exit) {}
+    }
+
+    #[test]
+    fn reports_exit_without_waiting_for_child_that_ignores_sighup() {
+        // 子が SIGHUP を無視すると Pty の Drop（SIGHUP → wait）がブロックするが、Exit はその前に届くべき
+        let (terminal, mut events) =
+            Terminal::spawn(sh("trap '' HUP; echo ready; sleep 8"), SIZE).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // trap が設定されるまで待つ
+        while !terminal.snapshot().rows[0].text().starts_with("ready") {
+            terminal.handle_event(next_event(&mut events, deadline));
+        }
+        drop(terminal);
         while !matches!(next_event(&mut events, deadline), Event::Exit) {}
     }
 }

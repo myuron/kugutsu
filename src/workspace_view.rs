@@ -26,8 +26,9 @@ const DEFAULT_TITLE: &str = "kugutsu";
 /// タイトル未設定のタブに表示する名前。
 const UNTITLED_TAB: &str = "shell";
 const TAB_BAR_HEIGHT: f32 = 28.0;
-const TAB_BAR_BACKGROUND: u32 = 0x181818;
-const TAB_BAR_BORDER: u32 = 0x2b2b2b;
+const STATUS_LINE_HEIGHT: f32 = 22.0;
+const BAR_BACKGROUND: u32 = 0x181818;
+const BAR_BORDER: u32 = 0x2b2b2b;
 const INACTIVE_TAB_FOREGROUND: u32 = 0x8a8a8a;
 const PREFIX_INDICATOR: u32 = 0xdcdcaa;
 
@@ -175,7 +176,7 @@ impl WorkspaceView {
                 .items_center()
                 .px(px(12.0))
                 .border_r_1()
-                .border_color(rgb(TAB_BAR_BORDER))
+                .border_color(rgb(BAR_BORDER))
                 .text_color(rgb(if active {
                     colors::DEFAULT_FOREGROUND
                 } else {
@@ -193,20 +194,26 @@ impl WorkspaceView {
             .flex_none()
             .h(px(TAB_BAR_HEIGHT))
             .text_size(px(12.0))
-            .bg(rgb(TAB_BAR_BACKGROUND))
+            .bg(rgb(BAR_BACKGROUND))
             .border_b_1()
-            .border_color(rgb(TAB_BAR_BORDER))
+            .border_color(rgb(BAR_BORDER))
             .children(tabs)
-            .when(self.keymap.is_armed(), |bar| {
-                bar.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .ml_auto()
-                        .px(px(12.0))
-                        .text_color(rgb(PREFIX_INDICATOR))
-                        .child(PREFIX),
-                )
+    }
+
+    /// 画面下部のステータスライン。prefix 入力待ちのときはその旨を表示する。
+    fn render_status_line(&self) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .h(px(STATUS_LINE_HEIGHT))
+            .px(px(12.0))
+            .text_size(px(12.0))
+            .bg(rgb(BAR_BACKGROUND))
+            .border_t_1()
+            .border_color(rgb(BAR_BORDER))
+            .when(self.keymap.is_armed(), |line| {
+                line.child(div().text_color(rgb(PREFIX_INDICATOR)).child(PREFIX))
             })
     }
 }
@@ -226,6 +233,7 @@ impl Render for WorkspaceView {
                     .overflow_hidden()
                     .children(self.tabs.active().map(|tab| tab.view.clone())),
             )
+            .child(self.render_status_line())
     }
 }
 

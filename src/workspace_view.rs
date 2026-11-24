@@ -4,8 +4,8 @@
 use alacritty_terminal::event::Event;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    AnyElement, Context, Entity, Focusable, KeyDownEvent, MouseButton, Render, Subscription, Task,
-    Window, div, prelude::*, px, rgb,
+    AnyElement, Context, Entity, Focusable, KeyDownEvent, MouseButton, Render, ScrollHandle,
+    SharedString, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb,
 };
 
 use std::time::Duration;
@@ -33,6 +33,8 @@ const WORKSPACE_BAR_HEIGHT: f32 = 28.0;
 const TAB_BAR_HEIGHT: f32 = 28.0;
 /// workspace ライン・タブバーの各項目の幅（両者で揃える）。
 const BAR_ITEM_WIDTH: f32 = 140.0;
+/// バー右端の `<` `>` ボタンの幅。
+const SCROLL_BUTTON_WIDTH: f32 = 24.0;
 const STATUS_LINE_HEIGHT: f32 = 22.0;
 const BAR_BACKGROUND: u32 = 0x181818;
 const BAR_BORDER: u32 = 0x2b2b2b;
@@ -84,6 +86,9 @@ pub struct WorkspaceView {
     spawn_options: SpawnOptions,
     /// Agent 一覧のサイドバーを表示するか。
     sidebar_visible: bool,
+    /// workspace ライン・タブバーの横スクロール位置。
+    workspace_scroll: ScrollHandle,
+    tab_scroll: ScrollHandle,
     _agent_poll: Task<()>,
 }
 
@@ -103,6 +108,8 @@ impl WorkspaceView {
             keymap: PrefixKeymap::default(),
             spawn_options,
             sidebar_visible: true,
+            workspace_scroll: ScrollHandle::new(),
+            tab_scroll: ScrollHandle::new(),
             _agent_poll: Self::poll_agents(window, cx),
         };
         this.activate(window, cx);
@@ -401,7 +408,13 @@ impl WorkspaceView {
     }
 
     /// アクティブなタブのアクティブなペインにフォーカスを移し、ウィンドウタイトルを合わせる。
+    /// アクティブな workspace・タブがバーからはみ出していれば、見える位置までスクロールする。
     fn activate(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.workspace_scroll
+            .scroll_to_item(self.workspaces.active_index());
+        if let Some(tabs) = self.active_tabs() {
+            self.tab_scroll.scroll_to_item(tabs.active_index());
+        }
         if let Some(view) = self.active_tab().and_then(Tab::active_view) {
             window.focus(&view.focus_handle(cx));
         }
@@ -419,16 +432,23 @@ impl WorkspaceView {
     /// タブバーの上に置く workspace の一覧。クリックでその workspace へ切り替える。
     fn render_workspace_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active_index = self.workspaces.active_index();
-        let items =
-            (0..self.workspaces.iter().count()).map(|index| {
+        let items = (0..self.workspaces.iter().count())
+            .map(|index| {
                 bar_item(index == active_index, workspace_label(index))
                     .id(("workspace", index))
                     .debug_selector(|| format!("workspace-{index}"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.select_workspace(index, window, cx)
                     }))
-            });
-        bar(WORKSPACE_BAR_HEIGHT).children(items)
+            })
+            .collect();
+        scrollable_bar(
+            "workspace",
+            WORKSPACE_BAR_HEIGHT,
+            &self.workspace_scroll,
+            items,
+            cx,
+        )
     }
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -447,7 +467,7 @@ impl WorkspaceView {
                 );
             }
         }
-        bar(TAB_BAR_HEIGHT).children(items)
+        scrollable_bar("tab", TAB_BAR_HEIGHT, &self.tab_scroll, items, cx)
     }
 
     /// アクティブなタブのペインを分割どおりに並べる。
@@ -669,8 +689,15 @@ impl Render for WorkspaceView {
     }
 }
 
-/// workspace ライン・タブバーの土台（横並び・下線付き）。
-fn bar(height: f32) -> gpui::Div {
+/// workspace ライン・タブバー。項目は横スクロールし、右端の `<` `>` で 1 項目分ずつ動かす。
+/// `name` はデバッグ用セレクタ（`{name}-bar`, `{name}-scroll-left` など）の接頭辞。
+fn scrollable_bar(
+    name: &'static str,
+    height: f32,
+    scroll: &ScrollHandle,
+    items: Vec<Stateful<gpui::Div>>,
+    cx: &mut Context<WorkspaceView>,
+) -> gpui::Div {
     div()
         .flex()
         .flex_none()
@@ -679,6 +706,64 @@ fn bar(height: f32) -> gpui::Div {
         .bg(rgb(BAR_BACKGROUND))
         .border_b_1()
         .border_color(rgb(BAR_BORDER))
+        .child(
+            div()
+                .id(SharedString::from(format!("{name}-bar")))
+                .debug_selector(move || format!("{name}-bar"))
+                .flex()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_x_scroll()
+                .track_scroll(scroll)
+                .children(items),
+        )
+        .child(scroll_button(name, "left", "<", BAR_ITEM_WIDTH, scroll, cx))
+        .child(scroll_button(
+            name,
+            "right",
+            ">",
+            -BAR_ITEM_WIDTH,
+            scroll,
+            cx,
+        ))
+}
+
+/// バーを `delta` だけ横にスクロールするボタン（正の値で左端側へ戻る）。
+fn scroll_button(
+    name: &'static str,
+    side: &'static str,
+    label: &'static str,
+    delta: f32,
+    scroll: &ScrollHandle,
+    cx: &mut Context<WorkspaceView>,
+) -> impl IntoElement {
+    let scroll = scroll.clone();
+    div()
+        .id(SharedString::from(format!("{name}-scroll-{side}")))
+        .debug_selector(move || format!("{name}-scroll-{side}"))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w(px(SCROLL_BUTTON_WIDTH))
+        .border_l_1()
+        .border_color(rgb(BAR_BORDER))
+        .text_color(rgb(INACTIVE_TAB_FOREGROUND))
+        .cursor_pointer()
+        .hover(|button| button.text_color(rgb(colors::DEFAULT_FOREGROUND)))
+        .child(label)
+        .on_click(cx.listener(move |_, _, _, cx| {
+            scroll_by(&scroll, delta);
+            cx.notify();
+        }))
+}
+
+/// 横スクロール位置を `delta` だけ動かす（スクロールできる範囲に収める）。
+fn scroll_by(scroll: &ScrollHandle, delta: f32) {
+    let offset = scroll.offset();
+    let min = -scroll.max_offset().width;
+    let x = (offset.x + px(delta)).clamp(min, px(0.0));
+    scroll.set_offset(point(x, offset.y));
 }
 
 /// workspace ライン・タブバーの 1 項目。アクティブなものは背景を本文と揃えて強調する。
@@ -904,6 +989,71 @@ mod tests {
         // ラベルの長さ（"Workspace 1" と "1: shell"）が違っても幅は揃う
         assert_eq!(workspace_item.size.width, tab_item.size.width);
         assert_eq!(workspace_item.size.width, px(BAR_ITEM_WIDTH));
+    }
+
+    /// 項目が 5 個ほどしか並ばない幅のウィンドウで、`keys` を `count` 回押す。
+    fn overflow_bar(cx: &mut VisualTestContext, keys: &str, count: usize) {
+        cx.simulate_resize(gpui::size(px(800.0), px(500.0)));
+        for _ in 0..count {
+            cx.simulate_keystrokes(keys);
+        }
+        cx.run_until_parked();
+    }
+
+    fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> gpui::Bounds<gpui::Pixels> {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is rendered"))
+    }
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let center = bounds(cx, selector).center();
+        cx.simulate_click(center, gpui::Modifiers::none());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn active_tab_stays_visible_when_tabs_overflow(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace(cx);
+        overflow_bar(cx, "ctrl-b c", 8);
+
+        // 末尾の（アクティブな）タブは右端のボタンより左に収まる
+        let last = bounds(cx, "tab-8");
+        let button = bounds(cx, "tab-scroll-left");
+        assert!(last.right() <= button.left(), "{last:?} / {button:?}");
+
+        // 先頭のタブへ切り替えると、そこが見える位置まで戻る
+        cx.simulate_keystrokes("ctrl-b 1");
+        cx.run_until_parked();
+        let bar = bounds(cx, "tab-bar");
+        assert!(bounds(cx, "tab-0").left() >= bar.left());
+    }
+
+    #[gpui::test]
+    fn scroll_buttons_scroll_tab_bar_by_one_item(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace(cx);
+        overflow_bar(cx, "ctrl-b c", 8);
+        let start = bounds(cx, "tab-0").left();
+
+        click(cx, "tab-scroll-left");
+        assert_eq!(bounds(cx, "tab-0").left(), start + px(BAR_ITEM_WIDTH));
+
+        click(cx, "tab-scroll-right");
+        assert_eq!(bounds(cx, "tab-0").left(), start);
+    }
+
+    #[gpui::test]
+    fn scroll_buttons_scroll_workspace_bar_by_one_item(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace(cx);
+        overflow_bar(cx, "ctrl-b shift-c", 8);
+        let last = bounds(cx, "workspace-8");
+        assert!(last.right() <= bounds(cx, "workspace-scroll-left").left());
+        let start = bounds(cx, "workspace-0").left();
+
+        click(cx, "workspace-scroll-left");
+        assert_eq!(bounds(cx, "workspace-0").left(), start + px(BAR_ITEM_WIDTH));
+
+        click(cx, "workspace-scroll-right");
+        assert_eq!(bounds(cx, "workspace-0").left(), start);
     }
 
     #[gpui::test]

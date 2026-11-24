@@ -86,6 +86,7 @@ impl Terminal {
         self.term.lock().resize(size);
     }
 
+    #[cfg(test)]
     pub fn size(&self) -> GridSize {
         self.size
     }
@@ -124,15 +125,14 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut received = Vec::new();
         while Instant::now() < deadline {
-            match events.try_next() {
-                Ok(Some(event)) => {
+            match events.try_recv() {
+                Ok(event) => {
                     let exit = matches!(event, Event::Exit);
                     received.push(event);
                     if exit {
                         return received;
                     }
                 }
-                Ok(None) => break,
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
         }

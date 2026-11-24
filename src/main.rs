@@ -1,4 +1,5 @@
 mod font;
+mod tabs;
 mod terminal;
 mod terminal_view;
 

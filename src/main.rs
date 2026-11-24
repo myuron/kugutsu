@@ -1,3 +1,4 @@
+mod agents;
 mod font;
 mod panes;
 mod tabs;

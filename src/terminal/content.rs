@@ -58,7 +58,6 @@ pub struct Row {
 
 impl Row {
     /// 行全体のテキスト（全角文字の後半セルは含まない）。
-    #[cfg(test)]
     pub fn text(&self) -> String {
         self.segments.iter().map(|s| s.text.as_str()).collect()
     }

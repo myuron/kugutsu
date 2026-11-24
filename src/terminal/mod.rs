@@ -4,9 +4,11 @@ pub mod colors;
 pub mod content;
 pub mod keys;
 mod listener;
+pub mod process;
 pub mod size;
 
 use std::borrow::Cow;
+use std::fs::File;
 use std::io;
 use std::sync::Arc;
 use std::thread;
@@ -21,6 +23,7 @@ use futures::channel::mpsc::{self, UnboundedReceiver};
 
 use content::Snapshot;
 use listener::Listener;
+use process::ProcessInfo;
 use size::GridSize;
 
 /// 起動するプログラム。`None` なら `$SHELL`（未設定なら passwd に登録されたシェル）。
@@ -45,6 +48,8 @@ pub struct Terminal {
     term: Arc<FairMutex<Term<Listener>>>,
     notifier: Notifier,
     size: GridSize,
+    /// フォアグラウンドのプロセスを調べるために複製した PTY の master 側。
+    master: File,
 }
 
 impl Terminal {
@@ -62,6 +67,7 @@ impl Terminal {
             ..Options::default()
         };
         let pty = tty::new(&pty_options, size.window_size(), 0)?;
+        let master = pty.file().try_clone()?;
 
         let (sender, events) = mpsc::unbounded();
         let listener = Listener::new(sender);
@@ -95,6 +101,7 @@ impl Terminal {
                 term,
                 notifier,
                 size,
+                master,
             },
             events,
         ))
@@ -160,6 +167,20 @@ impl Terminal {
 
     pub fn snapshot(&self) -> Snapshot {
         content::snapshot(&self.term.lock())
+    }
+
+    /// 画面の各行の文字列（行末の空白は除く）。
+    pub fn screen_lines(&self) -> Vec<String> {
+        self.snapshot()
+            .rows
+            .iter()
+            .map(|row| row.text().trim_end().to_string())
+            .collect()
+    }
+
+    /// PTY のフォアグラウンドで動いているプロセス。
+    pub fn foreground_process(&self) -> Option<ProcessInfo> {
+        process::foreground_process(&self.master)
     }
 }
 
@@ -284,6 +305,33 @@ mod tests {
         let (terminal, mut events) = Terminal::spawn(sh("printf '\\033[?1h'"), SIZE).unwrap();
         run_until_exit(&terminal, &mut events);
         assert!(terminal.app_cursor());
+    }
+
+    #[test]
+    fn screen_lines_trim_trailing_spaces() {
+        let (terminal, mut events) = Terminal::spawn(sh("printf 'ab\\ncd'"), SIZE).unwrap();
+        run_until_exit(&terminal, &mut events);
+        let lines = terminal.screen_lines();
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0], "ab");
+        assert_eq!(lines[1], "cd");
+        assert_eq!(lines[2], "");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reports_foreground_process() {
+        let (terminal, _events) = Terminal::spawn(sh("exec sleep 5"), SIZE).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let process = terminal.foreground_process();
+            if let Some(process) = process.filter(|p| p.comm == "sleep") {
+                assert_eq!(process.argv, ["sleep", "5"]);
+                break;
+            }
+            assert!(Instant::now() < deadline, "sleep never became foreground");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

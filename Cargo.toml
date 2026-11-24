@@ -8,6 +8,7 @@ alacritty_terminal = "0.25"
 anyhow = "1.0.105"
 futures = "0.3.34"
 gpui = "0.2.2"
+libc = "0.2"
 
 # xattr 0.2.3 (gpui -> gpui_http_client -> zed-async-tar) は libc >= 0.2.190 で
 # Linux の ENOATTR が削除されたためビルドできない。ENODATA を使うローカルパッチを当てる。

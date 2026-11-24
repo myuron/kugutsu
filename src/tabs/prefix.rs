@@ -24,6 +24,8 @@ pub enum Command {
     Focus(Direction),
     /// アクティブなペインを閉じる（最後のペインならタブごと閉じる）。
     ClosePane,
+    /// Agent 一覧のサイドバーの表示を切り替える。
+    ToggleSidebar,
 }
 
 /// キー入力をどう扱うか。
@@ -80,6 +82,7 @@ fn command_for(keystroke: &Keystroke) -> Option<Command> {
         "k" => Command::Focus(Direction::Up),
         "l" => Command::Focus(Direction::Right),
         "x" => Command::ClosePane,
+        "b" => Command::ToggleSidebar,
         key => match key.parse::<usize>() {
             Ok(number @ 1..=9) => Command::SelectTab(number - 1),
             _ => return None,
@@ -132,6 +135,7 @@ mod tests {
             ("k", Command::Focus(Direction::Up)),
             ("l", Command::Focus(Direction::Right)),
             ("x", Command::ClosePane),
+            ("b", Command::ToggleSidebar),
         ];
         for (key, command) in cases {
             let mut keymap = PrefixKeymap::default();

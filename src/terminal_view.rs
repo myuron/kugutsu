@@ -14,7 +14,6 @@ use crate::terminal::content::Row;
 use crate::terminal::size::GridSize;
 use crate::terminal::{SpawnOptions, Terminal, colors, keys};
 
-const FONT_FAMILY: &str = "monospace";
 const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT_RATIO: f32 = 1.3;
 const PADDING: f32 = 4.0;
@@ -30,9 +29,11 @@ pub struct TerminalView {
 
 impl TerminalView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> anyhow::Result<Self> {
-        let font = font(FONT_FAMILY);
-        let font_size = px(FONT_SIZE);
         let text_system = window.text_system();
+        let font = font(crate::font::choose_monospace_family(
+            &text_system.all_font_names(),
+        ));
+        let font_size = px(FONT_SIZE);
         let font_id = text_system.resolve_font(&font);
         let cell_width = text_system.advance(font_id, font_size, 'm')?.width;
         let cell_height = (font_size * LINE_HEIGHT_RATIO).round();
@@ -66,6 +67,16 @@ impl TerminalView {
                     Event::PtyWrite(text) => {
                         this.update(cx, |view, _| view.terminal.write(text.into_bytes()))
                     }
+                    // fish などは起動時に色を問い合わせ、応答を待つので必ず返す
+                    Event::ColorRequest(index, format) => this.update(cx, |view, _| {
+                        if let Some(rgb) = colors::index_to_rgb(index) {
+                            view.terminal.write(format(rgb).into_bytes());
+                        }
+                    }),
+                    Event::TextAreaSizeRequest(format) => this.update(cx, |view, _| {
+                        let size = view.terminal.size().window_size();
+                        view.terminal.write(format(size).into_bytes());
+                    }),
                     Event::Title(title) => cx.update(|window, _| window.set_window_title(&title)),
                     Event::Exit => {
                         let _ = cx.update(|window, _| window.remove_window());

@@ -86,7 +86,6 @@ impl Terminal {
         self.term.lock().resize(size);
     }
 
-    #[cfg(test)]
     pub fn size(&self) -> GridSize {
         self.size
     }

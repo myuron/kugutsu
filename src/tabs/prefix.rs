@@ -79,20 +79,18 @@ const KEYS: &[(&str, Command)] = &[
 ];
 
 /// キーマップ一覧に表示する（キー操作, 説明）の組。
-pub fn bindings() -> Vec<(String, &'static str)> {
+/// キーは prefix の後に押すもの（prefix 自体は含まない）。
+pub fn bindings() -> Vec<(&'static str, &'static str)> {
     let mut bindings: Vec<_> = KEYS
         .iter()
-        .map(|&(key, command)| (format!("{PREFIX} {key}"), command.description()))
+        .map(|&(key, command)| (key, command.description()))
         .collect();
     // タブ切り替えの行の後ろに並べる
     let select_tab = KEYS
         .iter()
         .position(|&(_, command)| command == Command::PrevTab)
         .map_or(bindings.len(), |index| index + 1);
-    bindings.insert(
-        select_tab,
-        (format!("{PREFIX} 1-9"), Command::SelectTab(0).description()),
-    );
+    bindings.insert(select_tab, ("1-9", Command::SelectTab(0).description()));
     bindings
 }
 
@@ -254,14 +252,14 @@ mod tests {
     }
 
     #[test]
-    fn bindings_list_every_key_with_prefix() {
+    fn bindings_list_every_key_after_prefix() {
         let bindings = bindings();
         assert_eq!(bindings.len(), KEYS.len() + 1);
-        assert!(bindings.contains(&("ctrl-b ?".to_string(), "Show key bindings")));
-        assert!(bindings.contains(&("ctrl-b 1-9".to_string(), "Select tab N")));
-        for (keys, description) in &bindings {
-            assert!(keys.starts_with("ctrl-b "), "{keys}");
-            assert!(!description.is_empty(), "{keys}");
+        assert!(bindings.contains(&("?", "Show key bindings")));
+        assert!(bindings.contains(&("1-9", "Select tab N")));
+        for (key, description) in &bindings {
+            assert!(!key.contains(PREFIX), "{key}");
+            assert!(!description.is_empty(), "{key}");
         }
     }
 

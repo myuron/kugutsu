@@ -3,7 +3,7 @@
 //! prefix を押すと次の 1 キーを操作として解釈する。prefix を 2 回押すと prefix 自体を
 //! ターミナルへ送る。割り当ての無いキーは捨てる。
 
-use gpui::Keystroke;
+use gpui::{Keystroke, Modifiers};
 
 use crate::panes::{Axis, Direction};
 
@@ -26,6 +26,10 @@ pub enum Command {
     ClosePane,
     /// Agent 一覧のサイドバーの表示を切り替える。
     ToggleSidebar,
+    /// 新しい workspace（タブのグループ）を開く。
+    NewWorkspace,
+    NextWorkspace,
+    PrevWorkspace,
 }
 
 /// キー入力をどう扱うか。
@@ -68,6 +72,14 @@ impl PrefixKeymap {
 
 /// prefix の後に押されたキーに対応する操作。
 fn command_for(keystroke: &Keystroke) -> Option<Command> {
+    if keystroke.modifiers == Modifiers::shift() {
+        return match keystroke.key.as_str() {
+            "c" => Some(Command::NewWorkspace),
+            "n" => Some(Command::NextWorkspace),
+            "p" => Some(Command::PrevWorkspace),
+            _ => None,
+        };
+    }
     if keystroke.modifiers.modified() {
         return None;
     }
@@ -136,6 +148,9 @@ mod tests {
             ("l", Command::Focus(Direction::Right)),
             ("x", Command::ClosePane),
             ("b", Command::ToggleSidebar),
+            ("shift-c", Command::NewWorkspace),
+            ("shift-n", Command::NextWorkspace),
+            ("shift-p", Command::PrevWorkspace),
         ];
         for (key, command) in cases {
             let mut keymap = PrefixKeymap::default();

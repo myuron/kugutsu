@@ -52,6 +52,9 @@ const DONE_COLOR: u32 = 0x89d185;
 const KEYMAP_BACKDROP: u32 = 0x000000aa;
 /// キーマップ一覧のキー列の幅。
 const KEYMAP_KEY_COLUMN_WIDTH: f32 = 110.0;
+/// which-key の 1 項目（キー＋説明）の幅と、そのうちキー部分の幅。
+const WHICH_KEY_ITEM_WIDTH: f32 = 220.0;
+const WHICH_KEY_KEY_WIDTH: f32 = 56.0;
 
 struct Pane {
     view: Entity<TerminalView>,
@@ -605,6 +608,7 @@ impl WorkspaceView {
     /// 画面下部のステータスライン。prefix 入力待ちのときはその旨を表示する。
     fn render_status_line(&self) -> impl IntoElement {
         div()
+            .debug_selector(|| "status-line".into())
             .flex()
             .flex_none()
             .items_center()
@@ -619,9 +623,53 @@ impl WorkspaceView {
             })
     }
 
+    /// prefix 入力待ちのとき、ステータスラインのすぐ上に重ねて出す次のキーの候補
+    /// （vim の which-key 風）。ターミナルを縮めてリサイズさせないよう、レイアウトには
+    /// 参加させずに重ねる。
+    fn render_which_key(&self) -> impl IntoElement {
+        let items = bindings().into_iter().map(|(key, description)| {
+            div()
+                .flex()
+                .flex_none()
+                .gap(px(8.0))
+                .w(px(WHICH_KEY_ITEM_WIDTH))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(WHICH_KEY_KEY_WIDTH))
+                        .text_color(rgb(PREFIX_INDICATOR))
+                        .child(key),
+                )
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .truncate()
+                        .text_color(rgb(colors::DEFAULT_FOREGROUND))
+                        .child(description),
+                )
+        });
+        div()
+            .debug_selector(|| "which-key".into())
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(px(STATUS_LINE_HEIGHT))
+            .flex()
+            .flex_wrap()
+            .gap_y(px(4.0))
+            .px(px(12.0))
+            .py(px(8.0))
+            .text_size(px(12.0))
+            .bg(rgb(BAR_BACKGROUND))
+            .border_t_1()
+            .border_color(rgb(BAR_BORDER))
+            .children(items)
+    }
+
     /// ウィンドウ全体に重ねるキーマップ一覧。背景をクリックすると閉じる。
     fn render_keymap_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = bindings().into_iter().map(|(keys, description)| {
+        let rows = bindings().into_iter().map(|(key, description)| {
             div()
                 .flex()
                 .gap(px(16.0))
@@ -630,7 +678,7 @@ impl WorkspaceView {
                         .w(px(KEYMAP_KEY_COLUMN_WIDTH))
                         .flex_none()
                         .text_color(rgb(PREFIX_INDICATOR))
-                        .child(keys),
+                        .child(format!("{PREFIX} {key}")),
                 )
                 .child(
                     div()
@@ -761,6 +809,7 @@ impl Render for WorkspaceView {
                             .child(self.render_tab_bar(cx))
                             .child(
                                 div()
+                                    .debug_selector(|| "panes".into())
                                     .flex_1()
                                     .min_h(px(0.0))
                                     .overflow_hidden()
@@ -769,6 +818,9 @@ impl Render for WorkspaceView {
                     ),
             )
             .child(self.render_status_line())
+            .when(self.keymap.is_armed(), |root| {
+                root.child(self.render_which_key())
+            })
             .when(self.keymap_help_visible, |root| {
                 root.child(self.render_keymap_help(cx))
             })
@@ -1224,6 +1276,33 @@ mod tests {
         let corner = backdrop.origin + gpui::point(px(5.0), px(5.0));
         cx.simulate_click(corner, gpui::Modifiers::none());
         assert!(!keymap_help_visible(&workspace, cx));
+    }
+
+    #[gpui::test]
+    fn prefix_shows_which_key_above_status_line(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace(cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("which-key").is_none());
+        let panes_before = bounds(cx, "panes");
+
+        cx.simulate_keystrokes("ctrl-b");
+        cx.run_until_parked();
+        let which_key = bounds(cx, "which-key");
+        assert_eq!(which_key.bottom(), bounds(cx, "status-line").top());
+        // ターミナルを縮めず（リサイズさせず）上に重ねる
+        assert_eq!(bounds(cx, "panes"), panes_before);
+
+        cx.simulate_keystrokes("b");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("which-key").is_none());
+    }
+
+    #[gpui::test]
+    fn which_key_hides_after_unknown_key(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace(cx);
+        cx.simulate_keystrokes("ctrl-b z");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("which-key").is_none());
     }
 
     #[gpui::test]

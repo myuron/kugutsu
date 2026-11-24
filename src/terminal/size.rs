@@ -27,8 +27,8 @@ impl GridSize {
         WindowSize {
             num_lines: self.rows,
             num_cols: self.cols,
-            cell_width: self.cell_width as u16,
-            cell_height: self.cell_height as u16,
+            cell_width: self.cell_width.round() as u16,
+            cell_height: self.cell_height.round() as u16,
         }
     }
 }
@@ -80,5 +80,25 @@ mod tests {
     fn ignores_invalid_cell_size() {
         let size = GridSize::from_pixels(800.0, 600.0, 0.0, f32::NAN);
         assert_eq!((size.cols, size.rows), (1, 1));
+    }
+
+    #[test]
+    fn negative_or_infinite_lengths_fall_back_to_one_cell() {
+        let size = GridSize::from_pixels(-10.0, f32::INFINITY, 10.0, 20.0);
+        assert_eq!((size.cols, size.rows), (1, 1));
+    }
+
+    #[test]
+    fn clamps_to_u16_max() {
+        let size = GridSize::from_pixels(1.0e9, 20.0, 1.0, 20.0);
+        assert_eq!(size.cols, u16::MAX);
+    }
+
+    #[test]
+    fn window_size_rounds_cell_pixels() {
+        let size = GridSize::from_pixels(800.0, 600.0, 8.6, 18.2);
+        let window = size.window_size();
+        assert_eq!((window.cell_width, window.cell_height), (9, 18));
+        assert_eq!((window.num_cols, window.num_lines), (size.cols, size.rows));
     }
 }

@@ -4,7 +4,13 @@ use alacritty_terminal::event::{Event, EventListener};
 use futures::channel::mpsc::UnboundedSender;
 
 #[derive(Clone)]
-pub struct Listener(pub UnboundedSender<Event>);
+pub struct Listener(UnboundedSender<Event>);
+
+impl Listener {
+    pub fn new(sender: UnboundedSender<Event>) -> Self {
+        Self(sender)
+    }
+}
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {

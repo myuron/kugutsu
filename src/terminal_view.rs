@@ -9,6 +9,7 @@ use gpui::{
     UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*, px, rgb, size,
 };
 
+use crate::agents::{self, AgentTracker};
 use crate::terminal::content::{Snapshot, Style};
 use crate::terminal::size::GridSize;
 use crate::terminal::{Terminal, TerminalEvent, colors, keys};
@@ -35,6 +36,8 @@ pub struct TerminalView {
     focus_handle: FocusHandle,
     metrics: CellMetrics,
     title: Option<String>,
+    /// フォアグラウンドで動いている Agent（[`TerminalView::refresh_agent`] で更新する）。
+    agent: Option<AgentTracker>,
     _events: Task<()>,
 }
 
@@ -96,6 +99,7 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             metrics: CellMetrics::measure(window),
             title: None,
+            agent: None,
             _events: Self::handle_events(events, window, cx),
         }
     }
@@ -107,6 +111,22 @@ impl TerminalView {
 
     pub fn grid_size(&self) -> GridSize {
         self.terminal.size()
+    }
+
+    /// フォアグラウンドで動いている Agent とその状態。
+    pub fn agent(&self) -> Option<AgentTracker> {
+        self.agent
+    }
+
+    /// フォアグラウンドのプロセスと画面から Agent の状態を更新する。`focused` はユーザーが
+    /// このペインを見ているか。変化があれば true を返す。
+    pub fn refresh_agent(&mut self, focused: bool) -> bool {
+        let kind = self
+            .terminal
+            .foreground_process()
+            .and_then(|process| agents::detect_agent(&process));
+        let terminal = &self.terminal;
+        agents::refresh(&mut self.agent, kind, || terminal.screen_lines(), focused)
     }
 
     fn handle_events(

@@ -5,6 +5,7 @@
   rust-bin,
   wayland,
   vulkan-loader,
+  libgit2,
 }:
 let
   toolchain = rust-bin.stable.latest.default;
@@ -20,7 +21,9 @@ rustPlatform.buildRustPackage {
   src = ../.;
   cargoLock.lockFile = ../Cargo.lock;
 
-  inherit (gpuiDeps) nativeBuildInputs buildInputs;
+  inherit (gpuiDeps) nativeBuildInputs;
+  # gpui の test-support（dev-dependencies）が git2 経由で libgit2 を使う。checkPhase で必要
+  buildInputs = gpuiDeps.buildInputs ++ [ libgit2 ];
 
   # wayland / vulkan は dlopen されるので rpath に追加する
   postFixup = ''

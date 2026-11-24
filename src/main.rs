@@ -30,7 +30,7 @@ fn main() {
             ..Default::default()
         };
         let opened = cx.open_window(options, |window, cx| {
-            cx.new(|cx| WorkspaceView::new(terminal, events, window, cx))
+            cx.new(|cx| WorkspaceView::new(terminal, events, SpawnOptions::default(), window, cx))
         });
         if let Err(err) = opened {
             eprintln!("failed to open window: {err:#}");

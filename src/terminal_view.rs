@@ -155,17 +155,20 @@ impl Render for TerminalView {
             .bg(rgb(colors::DEFAULT_BACKGROUND))
             .child(
                 canvas(
-                    // 要素自身の大きさからグリッドサイズを決め、変わっていれば PTY をリサイズして再描画する
+                    // 要素自身の大きさからグリッドサイズを決める。変わっていれば PTY をリサイズし、
+                    // 同じフレームで描けるようにスナップショットを取り直す（描画中の notify は無視されるため）
                     move |bounds, _, cx| {
                         let size = prepaint_metrics.grid_size(bounds);
-                        if size != current_size {
-                            let _ = view.update(cx, |view, cx| {
-                                view.terminal.resize(size);
-                                cx.notify();
-                            });
+                        if size == current_size {
+                            return snapshot;
                         }
+                        view.update(cx, |view, _| {
+                            view.terminal.resize(size);
+                            view.terminal.snapshot()
+                        })
+                        .unwrap_or(snapshot)
                     },
-                    move |bounds, (), window, cx| {
+                    move |bounds, snapshot, window, cx| {
                         paint_snapshot(&snapshot, &paint_metrics, bounds, window, cx)
                     },
                 )

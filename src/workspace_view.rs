@@ -62,6 +62,8 @@ impl Tab {
 pub struct WorkspaceView {
     tabs: Tabs<Tab>,
     keymap: PrefixKeymap,
+    /// 新しいタブ・ペインで起動するプログラム。
+    spawn_options: SpawnOptions,
     /// Agent 一覧のサイドバーを表示するか。
     sidebar_visible: bool,
     _agent_poll: Task<()>,
@@ -69,9 +71,11 @@ pub struct WorkspaceView {
 
 impl WorkspaceView {
     /// 起動済みのターミナルを最初のタブとして持つワークスペースを作る。
+    /// 以降に開くタブ・ペインでは `spawn_options` のプログラムを起動する。
     pub fn new(
         terminal: Terminal,
         events: UnboundedReceiver<Event>,
+        spawn_options: SpawnOptions,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -81,6 +85,7 @@ impl WorkspaceView {
                 panes: Panes::new(first),
             }),
             keymap: PrefixKeymap::default(),
+            spawn_options,
             sidebar_visible: true,
             _agent_poll: Self::poll_agents(window, cx),
         };
@@ -137,7 +142,7 @@ impl WorkspaceView {
             .active()
             .and_then(Tab::active_view)
             .map_or(INITIAL_SIZE, |view| view.read(cx).grid_size());
-        match Terminal::spawn(SpawnOptions::default(), size) {
+        match Terminal::spawn(self.spawn_options.clone(), size) {
             Ok((terminal, events)) => Some(Self::create_pane(terminal, events, window, cx)),
             Err(err) => {
                 eprintln!("failed to start terminal: {err}");
@@ -362,8 +367,10 @@ impl WorkspaceView {
                 let location = tab_label(tab_index, view.title());
                 let active = tab_index == active_tab && pane_id == tab.panes.active_id();
                 let color = rgb(state_color(agent.state));
+                let index = rows.len();
                 let row = div()
-                    .id(("agent", rows.len()))
+                    .id(("agent", index))
+                    .debug_selector(|| format!("agent-{index}"))
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
@@ -564,6 +571,91 @@ fn window_title(title: Option<&str>) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{App, TestAppContext, VisualTestContext};
+
+    fn sleep_options() -> SpawnOptions {
+        SpawnOptions {
+            program: Some(("sleep".into(), vec!["30".into()])),
+        }
+    }
+
+    /// 最初のペインで `first` を動かし、以降のペインは `sleep` を動かすワークスペースを開く。
+    fn open_workspace_with(
+        cx: &mut TestAppContext,
+        first: SpawnOptions,
+    ) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
+        let (terminal, events) = Terminal::spawn(first, INITIAL_SIZE).unwrap();
+        cx.add_window_view(|window, cx| {
+            WorkspaceView::new(terminal, events, sleep_options(), window, cx)
+        })
+    }
+
+    /// シェルの代わりに終了しない軽いプログラムを動かすワークスペースを開く。
+    fn open_workspace(cx: &mut TestAppContext) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
+        open_workspace_with(cx, sleep_options())
+    }
+
+    /// `claude` という名前で動く（Claude Code として検出される）偽の Agent。
+    fn fake_claude() -> SpawnOptions {
+        let dir = std::env::temp_dir().join(format!("kugutsu-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("claude");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        SpawnOptions {
+            program: Some((script.to_string_lossy().into_owned(), Vec::new())),
+        }
+    }
+
+    /// ポーリングを進め、条件を満たすまで待つ（PTY 上のプロセスは実時間で動くため）。
+    fn poll_until(
+        workspace: &Entity<WorkspaceView>,
+        cx: &mut VisualTestContext,
+        mut done: impl FnMut(&WorkspaceView, &App) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            cx.executor().advance_clock(AGENT_POLL_INTERVAL);
+            cx.run_until_parked();
+            if workspace.read_with(cx, |workspace, cx| done(workspace, cx)) {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "condition never met");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn clicking_agent_in_sidebar_focuses_its_tab(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with(cx, fake_claude());
+        cx.simulate_keystrokes("ctrl-b c");
+        assert_eq!(workspace.read_with(cx, |w, _| w.tabs.active_index()), 1);
+
+        poll_until(&workspace, cx, |workspace, cx| {
+            let first_tab = workspace.tabs.iter().next().unwrap();
+            first_tab
+                .active_view()
+                .is_some_and(|view| view.read(cx).agent().is_some())
+        });
+
+        let row = cx.debug_bounds("agent-0").expect("agent row is rendered");
+        cx.simulate_click(row.center(), gpui::Modifiers::none());
+        assert_eq!(workspace.read_with(cx, |w, _| w.tabs.active_index()), 0);
+    }
+
+    #[gpui::test]
+    fn prefix_b_toggles_sidebar(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        assert!(workspace.read_with(cx, |workspace, _| workspace.sidebar_visible));
+
+        cx.simulate_keystrokes("ctrl-b b");
+        assert!(!workspace.read_with(cx, |workspace, _| workspace.sidebar_visible));
+
+        cx.simulate_keystrokes("ctrl-b b");
+        assert!(workspace.read_with(cx, |workspace, _| workspace.sidebar_visible));
+    }
 
     #[test]
     fn tab_label_numbers_from_one() {

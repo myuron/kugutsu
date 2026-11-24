@@ -10,6 +10,10 @@ futures = "0.3.34"
 gpui = "0.2.2"
 libc = "0.2"
 
+[dev-dependencies]
+# gpui のビューを TestAppContext / VisualTestContext でテストするため
+gpui = { version = "0.2.2", features = ["test-support"] }
+
 # xattr 0.2.3 (gpui -> gpui_http_client -> zed-async-tar) は libc >= 0.2.190 で
 # Linux の ENOATTR が削除されたためビルドできない。ENODATA を使うローカルパッチを当てる。
 [patch.crates-io]

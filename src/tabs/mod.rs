@@ -60,12 +60,16 @@ impl<T> Tabs<T> {
         self.items.get(self.active)
     }
 
-    pub fn active_index(&self) -> usize {
-        self.active
+    pub fn active_mut(&mut self) -> Option<&mut T> {
+        self.items.get_mut(self.active)
     }
 
-    pub fn position(&self, predicate: impl FnMut(&T) -> bool) -> Option<usize> {
-        self.items.iter().position(predicate)
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.items.get_mut(index)
+    }
+
+    pub fn active_index(&self) -> usize {
+        self.active
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &T> {
@@ -175,9 +179,15 @@ mod tests {
     }
 
     #[test]
-    fn finds_position() {
-        let tabs = tabs(&["a", "b", "c"], 0);
-        assert_eq!(tabs.position(|t| *t == "b"), Some(1));
-        assert_eq!(tabs.position(|t| *t == "z"), None);
+    fn mutates_active_and_indexed_tabs() {
+        let mut tabs = tabs(&["a", "b", "c"], 1);
+        *tabs.active_mut().unwrap() = "B";
+        *tabs.get_mut(2).unwrap() = "C";
+        assert!(tabs.get_mut(3).is_none());
+        assert_eq!(tabs.iter().copied().collect::<Vec<_>>(), ["a", "B", "C"]);
+        tabs.remove(0);
+        tabs.remove(0);
+        tabs.remove(0);
+        assert!(tabs.active_mut().is_none());
     }
 }

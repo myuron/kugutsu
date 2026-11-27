@@ -45,7 +45,6 @@ icons! {
     Check => "check",
     Circle => "circle",
     Workspace => "workspace",
-    Puppet => "puppet",
     Terminal => "terminal",
     Plus => "plus",
     ChevronLeft => "chevron-left",

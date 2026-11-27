@@ -672,7 +672,6 @@ impl WorkspaceView {
                     .text_size(px(TEXT_LG))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(ui.foreground))
-                    .child(icon(Icon::Puppet, 14.0).text_color(rgb(ui.foreground)))
                     .child("kugutsu"),
             )
             .child(

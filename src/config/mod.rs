@@ -48,12 +48,24 @@ pub struct Loaded {
     pub errors: Vec<String>,
 }
 
-/// 設定ファイルの場所。`$XDG_CONFIG_HOME/kugutsu/init.lua`、無ければ
-/// `$HOME/.config/kugutsu/init.lua`。どちらも無ければ `None`。
-pub fn config_path(xdg_config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    let non_empty = |dir: Option<OsString>| dir.filter(|dir| !dir.is_empty()).map(PathBuf::from);
-    let config_home =
-        non_empty(xdg_config_home).or_else(|| non_empty(home).map(|home| home.join(".config")))?;
+/// 設定ファイルのパスを直接指定する環境変数。
+pub const CONFIG_ENV: &str = "KUGUTSU_CONFIG";
+
+/// 設定ファイルの場所。`var` は環境変数を読む関数（`std::env::var_os` など）。
+///
+/// `$KUGUTSU_CONFIG`、`$XDG_CONFIG_HOME/kugutsu/init.lua`、`$HOME/.config/kugutsu/init.lua`
+/// の順に、空でない環境変数から決める。どれも無ければ `None`。
+pub fn config_path(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let non_empty = |name: &str| {
+        var(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    if let Some(path) = non_empty(CONFIG_ENV) {
+        return Some(path);
+    }
+    let config_home = non_empty("XDG_CONFIG_HOME")
+        .or_else(|| non_empty("HOME").map(|home| home.join(".config")))?;
     Some(config_home.join("kugutsu").join(FILE_NAME))
 }
 
@@ -73,10 +85,39 @@ pub fn load(path: &Path) -> Loaded {
 mod tests {
     use super::*;
 
+    /// `vars` だけが設定された環境で `config_path` を呼ぶ。
+    fn path_with(vars: &[(&str, &str)]) -> Option<PathBuf> {
+        config_path(|name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        })
+    }
+
     #[test]
-    fn config_path_prefers_xdg_config_home() {
+    fn config_path_prefers_kugutsu_config() {
         assert_eq!(
-            config_path(Some("/xdg".into()), Some("/home/me".into())),
+            path_with(&[
+                ("KUGUTSU_CONFIG", "/repo/examples/init.lua"),
+                ("XDG_CONFIG_HOME", "/xdg"),
+                ("HOME", "/home/me"),
+            ]),
+            Some(PathBuf::from("/repo/examples/init.lua"))
+        );
+    }
+
+    #[test]
+    fn config_path_ignores_empty_kugutsu_config() {
+        assert_eq!(
+            path_with(&[("KUGUTSU_CONFIG", ""), ("XDG_CONFIG_HOME", "/xdg")]),
+            Some(PathBuf::from("/xdg/kugutsu/init.lua"))
+        );
+    }
+
+    #[test]
+    fn config_path_uses_xdg_config_home() {
+        assert_eq!(
+            path_with(&[("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/home/me")]),
             Some(PathBuf::from("/xdg/kugutsu/init.lua"))
         );
     }
@@ -84,7 +125,7 @@ mod tests {
     #[test]
     fn config_path_falls_back_to_home() {
         assert_eq!(
-            config_path(None, Some("/home/me".into())),
+            path_with(&[("HOME", "/home/me")]),
             Some(PathBuf::from("/home/me/.config/kugutsu/init.lua"))
         );
     }
@@ -92,15 +133,15 @@ mod tests {
     #[test]
     fn config_path_ignores_empty_xdg_config_home() {
         assert_eq!(
-            config_path(Some("".into()), Some("/home/me".into())),
+            path_with(&[("XDG_CONFIG_HOME", ""), ("HOME", "/home/me")]),
             Some(PathBuf::from("/home/me/.config/kugutsu/init.lua"))
         );
     }
 
     #[test]
     fn config_path_is_none_without_any_base() {
-        assert_eq!(config_path(None, None), None);
-        assert_eq!(config_path(Some("".into()), Some("".into())), None);
+        assert_eq!(path_with(&[]), None);
+        assert_eq!(path_with(&[("XDG_CONFIG_HOME", ""), ("HOME", "")]), None);
     }
 
     fn temp_dir(name: &str) -> PathBuf {

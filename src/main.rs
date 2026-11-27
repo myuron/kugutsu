@@ -5,6 +5,7 @@ mod panes;
 mod tabs;
 mod terminal;
 mod terminal_view;
+mod theme;
 mod workspace_view;
 
 use gpui::{App, Application, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};

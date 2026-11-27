@@ -32,7 +32,7 @@ pub fn evaluate(source: &str, chunk_name: &str) -> Loaded {
     let config = Rc::new(RefCell::new(Config::default()));
     let errors = match run(source, chunk_name, &config) {
         Ok(()) => Vec::new(),
-        Err(err) => vec![message(&err)],
+        Err(err) => vec![error_message(&err)],
     };
     let config = config.borrow().clone();
     Loaded { config, errors }
@@ -109,7 +109,7 @@ fn type_error(key: &str, expected: &str, value: &Value) -> String {
 }
 
 /// Lua の `type()` と同じ型名（mlua は整数を `integer` と呼ぶが、Lua では `number`）。
-fn lua_type_name(value: &Value) -> &'static str {
+pub(crate) fn lua_type_name(value: &Value) -> &'static str {
     match value {
         Value::Integer(_) => "number",
         _ => value.type_name(),
@@ -146,7 +146,7 @@ fn parse_keystroke(text: &str) -> Option<Keystroke> {
 }
 
 /// UI に出すエラーメッセージ。スタックトレースは落とす。
-fn message(err: &mlua::Error) -> String {
+pub(crate) fn error_message(err: &mlua::Error) -> String {
     let text = match err {
         mlua::Error::SyntaxError { message, .. } => message.clone(),
         mlua::Error::RuntimeError(message) => message.clone(),

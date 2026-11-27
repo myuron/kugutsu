@@ -13,6 +13,7 @@ use gpui::Keystroke;
 use crate::tabs::prefix::DEFAULT_PREFIX;
 
 pub use lua::evaluate;
+pub(crate) use lua::{error_message, lua_type_name};
 
 /// 設定ファイルの名前（エラー表示にも使う）。
 pub const FILE_NAME: &str = "init.lua";

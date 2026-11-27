@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=kugutsu
+Comment=Agentic Development Environment
+Exec=kugutsu
+Icon=kugutsu
+Terminal=false
+Categories=Development;System;TerminalEmulator;
+StartupWMClass=kugutsu

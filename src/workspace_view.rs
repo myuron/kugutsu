@@ -64,8 +64,6 @@ const KEYMAP_KEY_COLUMN_WIDTH: f32 = 130.0;
 /// which-key の 1 項目（キー＋説明）の幅と、そのうちキー部分の幅。
 const WHICH_KEY_ITEM_WIDTH: f32 = 220.0;
 const WHICH_KEY_KEY_WIDTH: f32 = 64.0;
-/// which-key のパネルの最大幅（項目 3 列分と余白）。
-const WHICH_KEY_MAX_WIDTH: f32 = 3.0 * WHICH_KEY_ITEM_WIDTH + 28.0;
 /// 浮いたパネルと画面の端・ステータスラインとの間隔。
 const OVERLAY_MARGIN: f32 = 8.0;
 
@@ -1035,13 +1033,13 @@ impl WorkspaceView {
                             .child(description),
                     )
             });
-        // ステータスラインの上に浮かせたパネル
+        // ステータスラインの上に浮かせたパネル。画面を縦に埋めないよう横幅いっぱいに並べる
         overlay_panel(&self.config.theme.ui)
             .debug_selector(|| "which-key".into())
             .absolute()
             .left(px(OVERLAY_MARGIN))
+            .right(px(OVERLAY_MARGIN))
             .bottom(px(STATUS_LINE_HEIGHT + OVERLAY_MARGIN))
-            .max_w(px(WHICH_KEY_MAX_WIDTH))
             .flex()
             .flex_wrap()
             .gap_y(px(6.0))
@@ -2447,6 +2445,9 @@ mod tests {
             px(OVERLAY_MARGIN)
         );
         assert_eq!(which_key.left(), px(OVERLAY_MARGIN));
+        // 縦に伸ばさないよう、ウィンドウの横幅いっぱいに広げて並べる
+        let line = bounds(cx, "status-line");
+        assert_eq!(line.right() - which_key.right(), px(OVERLAY_MARGIN));
         // キーはキーキャップとして説明と分けて描く
         let keycap = bounds(cx, "which-key-cap:c");
         assert!(which_key.contains(&keycap.center()));

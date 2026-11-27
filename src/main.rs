@@ -16,6 +16,13 @@ fn main() {
     // TERM / COLORTERM を設定する（内部で set_var を呼ぶため、スレッド生成前に一度だけ呼ぶ）
     alacritty_terminal::tty::setup_env();
 
+    let config = config::config_path(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )
+    .map(|path| config::load(&path))
+    .unwrap_or_default();
+
     let (terminal, events) = match Terminal::spawn(SpawnOptions::default(), INITIAL_SIZE) {
         Ok(spawned) => spawned,
         Err(err) => {
@@ -36,7 +43,7 @@ fn main() {
                     terminal,
                     events,
                     SpawnOptions::default(),
-                    config::Loaded::default(),
+                    config,
                     window,
                     cx,
                 )

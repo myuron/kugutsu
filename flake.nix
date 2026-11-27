@@ -50,6 +50,10 @@
               ++ gpuiDeps.nativeBuildInputs;
               buildInputs = gpuiDeps.buildInputs;
               LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath gpuiDeps.runtimeLibs;
+              # 開発中の `cargo run` ではリポジトリのサンプル設定を読む
+              shellHook = ''
+                export KUGUTSU_CONFIG="$PWD/examples/config/kugutsu/init.lua"
+              '';
             };
         };
       };

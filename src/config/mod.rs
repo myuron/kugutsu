@@ -10,10 +10,14 @@ use std::path::{Path, PathBuf};
 
 use gpui::{Keystroke, Rgba, WindowBackgroundAppearance, rgb};
 
+use crate::plugins::paths::Paths;
+use crate::plugins::spec::Spec;
 use crate::tabs::prefix::{DEFAULT_PREFIX, Keymap};
 use crate::theme::Theme;
 
-pub use lua::{LuaCallback, evaluate};
+#[cfg(test)]
+pub use lua::evaluate;
+pub use lua::{LuaCallback, evaluate_spec, evaluate_with};
 pub(crate) use lua::{error_message, lua_type_name};
 
 /// 設定ファイルの名前（エラー表示にも使う）。
@@ -81,6 +85,8 @@ impl Default for Config {
 pub struct Loaded {
     pub config: Config,
     pub errors: Vec<String>,
+    /// spec にあるが、まだインストールされていないプラグインの名前。
+    pub missing_plugins: Vec<String>,
 }
 
 /// 設定ファイルのパスを直接指定する環境変数。
@@ -104,15 +110,34 @@ pub fn config_path(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
     Some(config_home.join("kugutsu").join(FILE_NAME))
 }
 
-/// 設定ファイルを読み込む。ファイルが無ければ既定値を返す。
-pub fn load(path: &Path) -> Loaded {
-    match std::fs::read_to_string(path) {
-        Ok(source) => evaluate(&source, FILE_NAME),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Loaded::default(),
+/// 設定ファイルを読み込み、宣言したプラグインを読み込む。ファイルが無ければ既定値を返す。
+pub fn load(paths: &Paths) -> Loaded {
+    match read(&paths.init_lua) {
+        Ok(source) => evaluate_with(&source, FILE_NAME, Some(paths)),
         Err(err) => Loaded {
-            config: Config::default(),
-            errors: vec![format!("{}: {err}", path.display())],
+            errors: vec![err],
+            ..Loaded::default()
         },
+    }
+}
+
+/// 設定ファイルからプラグインの宣言だけを読む（CLI 用）。`init.lua` にエラーがあれば `Err`。
+pub fn load_spec(paths: &Paths) -> Result<Vec<Spec>, Vec<String>> {
+    let source = read(&paths.init_lua).map_err(|err| vec![err])?;
+    let (specs, errors) = evaluate_spec(&source, FILE_NAME, Some(paths));
+    if errors.is_empty() {
+        Ok(specs)
+    } else {
+        Err(errors)
+    }
+}
+
+/// 設定ファイルの中身。ファイルが無ければ空。
+fn read(path: &Path) -> Result<String, String> {
+    match std::fs::read_to_string(path) {
+        Ok(source) => Ok(source),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(format!("{}: {err}", path.display())),
     }
 }
 
@@ -219,14 +244,17 @@ mod tests {
     #[test]
     fn missing_file_means_defaults_without_errors() {
         let path = temp_dir("missing").join("init.lua");
-        assert_eq!(load(&path), Loaded::default());
+        assert_eq!(
+            load(&Paths::new(path.clone(), None, None)),
+            Loaded::default()
+        );
     }
 
     #[test]
     fn loads_options_from_file() {
         let path = temp_dir("file").join("init.lua");
         std::fs::write(&path, "kugutsu.opt.font_size = 18\n").unwrap();
-        let loaded = load(&path);
+        let loaded = load(&Paths::new(path.clone(), None, None));
         assert_eq!(loaded.errors, Vec::<String>::new());
         assert_eq!(loaded.config.font_size, 18.0);
     }
@@ -235,7 +263,7 @@ mod tests {
     fn unreadable_file_is_reported() {
         // ディレクトリはファイルとして読めない
         let path = temp_dir("unreadable");
-        let loaded = load(&path);
+        let loaded = load(&Paths::new(path.clone(), None, None));
         assert_eq!(loaded.config, Config::default());
         assert_eq!(loaded.errors.len(), 1);
     }

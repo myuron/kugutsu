@@ -2,6 +2,7 @@ mod agents;
 mod config;
 mod font;
 mod panes;
+mod plugins;
 mod tabs;
 mod terminal;
 mod terminal_view;
@@ -17,8 +18,8 @@ fn main() {
     // TERM / COLORTERM を設定する（内部で set_var を呼ぶため、スレッド生成前に一度だけ呼ぶ）
     alacritty_terminal::tty::setup_env();
 
-    let config = config::config_path(|name| std::env::var_os(name))
-        .map(|path| config::load(&path))
+    let config = plugins::paths::resolve(|name| std::env::var_os(name))
+        .map(|paths| config::load(&paths))
         .unwrap_or_default();
 
     let (terminal, events) = match Terminal::spawn(SpawnOptions::default(), INITIAL_SIZE) {

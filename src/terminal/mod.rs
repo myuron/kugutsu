@@ -5,6 +5,7 @@ pub mod content;
 pub mod keys;
 mod listener;
 pub mod process;
+pub mod scroll;
 pub mod size;
 
 use std::borrow::Cow;
@@ -21,9 +22,11 @@ use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::tty::{self, Options, Shell};
 use futures::channel::mpsc::{self, UnboundedReceiver};
 
+pub use alacritty_terminal::grid::Scroll;
 use content::{Cursor, Snapshot};
 use listener::Listener;
 use process::ProcessInfo;
+use scroll::WheelMode;
 use size::GridSize;
 
 /// 起動するプログラム。`None` なら `$SHELL`（未設定なら passwd に登録されたシェル）。
@@ -116,19 +119,19 @@ impl Terminal {
             Event::ResetTitle => Some(TerminalEvent::ResetTitle),
             Event::Exit => Some(TerminalEvent::Exit),
             Event::PtyWrite(text) => {
-                self.write(text.into_bytes());
+                self.reply(text.into_bytes());
                 None
             }
             // fish などは起動時に色を問い合わせ、応答を待つので必ず返す
             Event::ColorRequest(index, format) => {
                 let rgb = colors::index_to_rgb(index, self.term.lock().colors());
                 if let Some(rgb) = rgb {
-                    self.write(format(rgb).into_bytes());
+                    self.reply(format(rgb).into_bytes());
                 }
                 None
             }
             Event::TextAreaSizeRequest(format) => {
-                self.write(format(self.size.window_size()).into_bytes());
+                self.reply(format(self.size.window_size()).into_bytes());
                 None
             }
             // クリップボード連携・ベル・マウスカーソル形状は未対応
@@ -141,9 +144,30 @@ impl Terminal {
         }
     }
 
-    /// PTY に入力を書き込む。
+    /// ユーザーの入力を PTY に書き込む。スクロールバックを見ていれば最下部に戻る。
     pub fn write(&self, bytes: impl Into<Cow<'static, [u8]>>) {
+        self.scroll(Scroll::Bottom);
         self.notifier.notify(bytes);
+    }
+
+    /// 端末への問い合わせに応答する（ユーザーの入力ではないのでスクロール位置は変えない）。
+    fn reply(&self, bytes: impl Into<Cow<'static, [u8]>>) {
+        self.notifier.notify(bytes);
+    }
+
+    /// スクロールバックの表示位置を動かす。
+    pub fn scroll(&self, scroll: Scroll) {
+        self.term.lock().scroll_display(scroll);
+    }
+
+    /// 最下部から何行さかのぼって表示しているか。
+    pub fn display_offset(&self) -> usize {
+        self.term.lock().grid().display_offset()
+    }
+
+    /// ホイールを今どう扱うか。
+    pub fn wheel_mode(&self) -> WheelMode {
+        scroll::wheel_mode(*self.term.lock().mode())
     }
 
     /// グリッドと PTY のサイズを変更する。
@@ -174,13 +198,9 @@ impl Terminal {
         content::cursor_position(&self.term.lock())
     }
 
-    /// 画面の各行の文字列（行末の空白は除く）。
+    /// 画面の各行の文字列（行末の空白は除く）。スクロールバックを見ていても最下部の画面を返す。
     pub fn screen_lines(&self) -> Vec<String> {
-        self.snapshot()
-            .rows
-            .iter()
-            .map(|row| row.text().trim_end().to_string())
-            .collect()
+        content::bottom_screen_lines(&self.term.lock())
     }
 
     /// PTY のフォアグラウンドで動いているプロセス。
@@ -321,6 +341,57 @@ mod tests {
         assert_eq!(lines[0], "ab");
         assert_eq!(lines[1], "cd");
         assert_eq!(lines[2], "");
+    }
+
+    /// 5 行の画面に 1〜20 を出力して終了するターミナル。
+    fn terminal_with_scrollback() -> Terminal {
+        let (terminal, mut events) = Terminal::spawn(sh("seq 1 20"), SIZE).unwrap();
+        run_until_exit(&terminal, &mut events);
+        terminal
+    }
+
+    #[test]
+    fn scrolls_through_scrollback() {
+        let terminal = terminal_with_scrollback();
+        assert_eq!(terminal.display_offset(), 0);
+        terminal.scroll(Scroll::Delta(10));
+        assert_eq!(terminal.display_offset(), 10);
+        assert!(screen_text(&terminal).contains("10"));
+        assert!(!screen_text(&terminal).contains("20"));
+        terminal.scroll(Scroll::Bottom);
+        assert_eq!(terminal.display_offset(), 0);
+    }
+
+    #[test]
+    fn screen_lines_show_bottom_while_scrolled() {
+        let terminal = terminal_with_scrollback();
+        let bottom = terminal.screen_lines();
+        terminal.scroll(Scroll::PageUp);
+        assert_eq!(terminal.screen_lines(), bottom);
+    }
+
+    #[test]
+    fn writing_input_returns_to_bottom() {
+        let terminal = terminal_with_scrollback();
+        terminal.scroll(Scroll::Delta(3));
+        terminal.write(b"x".as_slice());
+        assert_eq!(terminal.display_offset(), 0);
+    }
+
+    #[test]
+    fn answering_queries_keeps_scroll_position() {
+        let terminal = terminal_with_scrollback();
+        terminal.scroll(Scroll::Delta(3));
+        terminal.handle_event(Event::PtyWrite("\x1b[0n".into()));
+        assert_eq!(terminal.display_offset(), 3);
+    }
+
+    #[test]
+    fn wheel_mode_follows_terminal_modes() {
+        let (terminal, mut events) =
+            Terminal::spawn(sh("printf '\\033[?1000h\\033[?1006h'"), SIZE).unwrap();
+        run_until_exit(&terminal, &mut events);
+        assert_eq!(terminal.wheel_mode(), WheelMode::Report { sgr: true });
     }
 
     #[cfg(target_os = "linux")]

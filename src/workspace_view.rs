@@ -4,14 +4,17 @@
 use alacritty_terminal::event::Event;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    AnyElement, Context, Entity, Focusable, KeyDownEvent, MouseButton, Render, Rgba, ScrollHandle,
-    SharedString, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb, rgba,
+    Animation, AnimationExt, AnyElement, App, Context, ElementId, Entity, Focusable, FontWeight,
+    KeyDownEvent, MouseButton, Render, Rgba, ScrollHandle, SharedString, Stateful, Subscription,
+    Svg, Task, Transformation, Window, div, percentage, point, prelude::*, pulsating_between, px,
+    rgb, rgba, svg,
 };
 
 use std::time::Duration;
 
-use crate::agents::AgentState;
+use crate::agents::{AgentKind, AgentState};
 use crate::config::{Config, Loaded};
+use crate::icons::{Icon, state_icon};
 use crate::panes::{Axis, Node, PaneId, Panes};
 use crate::tabs::Tabs;
 use crate::tabs::prefix::{Action, Command, KeyOutcome, PrefixKeymap};
@@ -31,14 +34,21 @@ pub const INITIAL_SIZE: GridSize = GridSize {
 const DEFAULT_TITLE: &str = "kugutsu";
 /// タイトル未設定のタブに表示する名前。
 const UNTITLED_TAB: &str = "shell";
-const WORKSPACE_BAR_HEIGHT: f32 = 28.0;
-const TAB_BAR_HEIGHT: f32 = 28.0;
+const WORKSPACE_BAR_HEIGHT: f32 = 34.0;
+const TAB_BAR_HEIGHT: f32 = 34.0;
+/// UI の文字の大きさ（補足・本文・見出し）。
+const TEXT_SM: f32 = 11.0;
+const TEXT_MD: f32 = 12.0;
+const TEXT_LG: f32 = 13.0;
+/// working のアイコンが 1 回転する時間と、blocked のアイコンが点滅する周期。
+const SPINNER_PERIOD: Duration = Duration::from_millis(1200);
+const PULSE_PERIOD: Duration = Duration::from_millis(1600);
 /// workspace ライン・タブバーの各項目の幅（両者で揃える）。
 const BAR_ITEM_WIDTH: f32 = 140.0;
 /// バー右端の `<` `>` ボタンの幅。
 const SCROLL_BUTTON_WIDTH: f32 = 24.0;
 const STATUS_LINE_HEIGHT: f32 = 22.0;
-const SIDEBAR_WIDTH: f32 = 220.0;
+const SIDEBAR_WIDTH: f32 = 260.0;
 /// Agent の状態を調べる間隔。
 const AGENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// キーマップ一覧の後ろに敷く半透明の背景（RGBA）。
@@ -555,72 +565,54 @@ impl WorkspaceView {
         Some(render_node(root, highlight, &self.config, cx))
     }
 
-    /// 全 workspace・全タブ・全ペインで動いている Agent の一覧。クリックでそのペインへ移る。
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// 全 workspace・全タブ・全ペインで動いている Agent を workspace ごとにまとめる。
+    fn agent_groups(&self, cx: &App) -> Vec<WorkspaceGroup> {
         let active_workspace = self.workspaces.active_index();
-        let mut rows = Vec::new();
-        let tabs = self
-            .workspaces
+        self.workspaces
             .iter()
             .enumerate()
-            .flat_map(|(workspace_index, workspace)| {
+            .map(|(workspace_index, workspace)| {
+                let active = workspace_index == active_workspace;
                 let active_tab = workspace.tabs.active_index();
-                workspace
-                    .tabs
-                    .iter()
-                    .enumerate()
-                    .map(move |(tab_index, tab)| {
-                        let active = workspace_index == active_workspace && tab_index == active_tab;
-                        (workspace_index, tab_index, tab, active)
-                    })
-            });
-        for (workspace_index, tab_index, tab, active_tab) in tabs {
-            for (pane_id, pane) in tab.panes.iter() {
-                let view = pane.view.read(cx);
-                let Some(agent) = view.agent() else { continue };
-                let location = agent_location(workspace_index, tab_index, view.title());
-                let active = active_tab && pane_id == tab.panes.active_id();
-                let color = rgb(state_color(&self.config.theme.ui, agent.state));
-                let index = rows.len();
-                let row = div()
-                    .id(("agent", index))
-                    .debug_selector(|| format!("agent-{index}"))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .cursor_pointer()
-                    .when(active, |row| {
-                        row.bg(self
-                            .config
-                            .translucent(self.config.theme.terminal.background))
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(div().text_color(color).child("●"))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_color(rgb(self.config.theme.terminal.foreground))
-                                    .child(agent.kind.label()),
-                            )
-                            .child(div().text_color(color).child(agent.state.label())),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(self.config.theme.ui.inactive_foreground))
-                            .truncate()
-                            .child(location),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.focus_agent_pane(workspace_index, tab_index, pane_id, window, cx)
-                    }));
-                rows.push(row);
-            }
+                let mut agents = Vec::new();
+                for (tab_index, tab) in workspace.tabs.iter().enumerate() {
+                    for (pane_number, (pane_id, pane)) in tab.panes.iter().enumerate() {
+                        let view = pane.view.read(cx);
+                        let Some(agent) = view.agent() else { continue };
+                        agents.push(AgentRow {
+                            workspace_index,
+                            tab_index,
+                            pane_id,
+                            kind: agent.kind,
+                            state: agent.state,
+                            location: agent_location(tab_index, view.title(), pane_number + 1),
+                            active: active
+                                && tab_index == active_tab
+                                && pane_id == tab.panes.active_id(),
+                        });
+                    }
+                }
+                WorkspaceGroup {
+                    index: workspace_index,
+                    active,
+                    agents,
+                }
+            })
+            .collect()
+    }
+
+    /// 全 workspace・全タブ・全ペインで動いている Agent の一覧。クリックでそのペインへ移る。
+    /// workspace ごとに見出しを置き、その下に Agent を並べる。
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui = &self.config.theme.ui;
+        let groups = self.agent_groups(cx);
+        let (blocked, total) = self.sidebar_counts(&groups);
+        let mut next_row = 0;
+        let mut elements = Vec::new();
+        for group in groups {
+            let first_row = next_row;
+            next_row += group.agents.len();
+            elements.push(self.render_agent_group(group, first_row, cx));
         }
 
         div()
@@ -630,32 +622,221 @@ impl WorkspaceView {
             .w(px(SIDEBAR_WIDTH))
             .h_full()
             .overflow_hidden()
-            .text_size(px(12.0))
-            .bg(self.config.translucent(self.config.theme.ui.bar_background))
+            .text_size(px(TEXT_MD))
+            .bg(self.config.translucent(ui.bar_background))
             .border_r_1()
-            .border_color(rgb(self.config.theme.ui.bar_border))
+            .border_color(rgb(ui.bar_border))
             .child(
-                // workspace ライン＋タブバーと高さ・下線を揃える
+                // workspace ラインと高さを揃える
                 div()
                     .flex()
                     .flex_none()
                     .items_center()
-                    .h(px(WORKSPACE_BAR_HEIGHT + TAB_BAR_HEIGHT))
-                    .px(px(10.0))
-                    .border_b_1()
-                    .border_color(rgb(self.config.theme.ui.bar_border))
-                    .text_color(rgb(self.config.theme.ui.inactive_foreground))
-                    .child("AGENTS"),
+                    .gap(px(8.0))
+                    .h(px(WORKSPACE_BAR_HEIGHT))
+                    .px(px(16.0))
+                    .text_size(px(TEXT_LG))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(ui.foreground))
+                    .child(icon(Icon::Puppet, 14.0).text_color(rgb(ui.foreground)))
+                    .child("kugutsu"),
             )
-            .when(rows.is_empty(), |sidebar| {
-                sidebar.child(
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(10.0))
+                    .h(px(TAB_BAR_HEIGHT))
+                    .px(px(14.0))
+                    .text_size(px(TEXT_SM))
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui.inactive_foreground))
+                            .child("AGENTS"),
+                    )
+                    .children(blocked.map(|blocked| {
+                        div()
+                            .debug_selector(|| "agents-blocked-count".into())
+                            .text_color(rgb(ui.agent_blocked))
+                            .child(blocked)
+                    }))
+                    .child(div().text_color(rgb(ui.inactive_foreground)).child(total)),
+            )
+            .child(
+                div()
+                    .id("agent-groups")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .overflow_y_scroll()
+                    .gap(px(10.0))
+                    .px(px(10.0))
+                    .pb(px(10.0))
+                    .children(elements),
+            )
+    }
+
+    /// サイドバーのヘッダに出す blocked の数（0 なら `None`）と Agent の総数。
+    fn sidebar_counts(&self, groups: &[WorkspaceGroup]) -> (Option<String>, String) {
+        let counts = AgentCounts::of(groups);
+        let blocked = (counts.blocked > 0).then(|| format!("{} blocked", counts.blocked));
+        (blocked, format!("{} total", counts.total()))
+    }
+
+    /// workspace の見出しと、細い縦線（操り糸）でつないだ Agent の行。
+    /// `first_row` はこの workspace の最初の行の通し番号（`agent-{n}` のセレクタに使う）。
+    fn render_agent_group(
+        &self,
+        group: WorkspaceGroup,
+        first_row: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ui = &self.config.theme.ui;
+        let index = group.index;
+        let note = if group.agents.is_empty() {
+            Some(("no agents", format!("agent-group-{index}-empty")))
+        } else if group.active {
+            Some(("current", format!("agent-group-{index}-current")))
+        } else {
+            None
+        };
+        let heading_color = rgb(if group.active {
+            ui.foreground
+        } else {
+            ui.inactive_foreground
+        });
+        let heading = div()
+            .debug_selector(move || format!("agent-group-{index}"))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(24.0))
+            .px(px(4.0))
+            .child(icon(Icon::Workspace, 13.0).text_color(heading_color))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_size(px(TEXT_LG))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(heading_color)
+                    .child(workspace_label(index)),
+            )
+            .children(note.map(|(text, selector)| {
+                div()
+                    .debug_selector(move || selector)
+                    .flex_none()
+                    .text_size(px(TEXT_SM))
+                    .text_color(rgb(ui.inactive_foreground))
+                    .child(text)
+            }));
+        let mut rows = Vec::new();
+        for (offset, agent) in group.agents.into_iter().enumerate() {
+            rows.push(self.render_agent_row(agent, first_row + offset, cx));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .child(heading)
+            .when(!rows.is_empty(), |group| {
+                group.child(
                     div()
-                        .px(px(10.0))
-                        .text_color(rgb(self.config.theme.ui.inactive_foreground))
-                        .child("No agents"),
+                        .debug_selector(move || format!("agent-group-{index}-strings"))
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .ml(px(10.0))
+                        .py(px(2.0))
+                        .border_l_1()
+                        .border_color(rgb(ui.strong_border))
+                        .children(rows),
                 )
             })
-            .children(rows)
+            .into_any_element()
+    }
+
+    /// サイドバーの Agent の 1 行。クリックでそのペインへ移る。
+    fn render_agent_row(&self, agent: AgentRow, row: usize, cx: &mut Context<Self>) -> AnyElement {
+        let ui = &self.config.theme.ui;
+        let color = state_color(ui, agent.state);
+        let blocked = agent.state == AgentState::Blocked;
+        let AgentRow {
+            workspace_index,
+            tab_index,
+            pane_id,
+            ..
+        } = agent;
+        let item = div()
+            .id(("agent", row))
+            .debug_selector(move || format!("agent-{row}"))
+            .flex()
+            .flex_1()
+            .min_w(px(0.0))
+            .items_center()
+            .gap(px(10.0))
+            .px(px(10.0))
+            .py(px(6.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(Rgba::default())
+            .cursor_pointer()
+            .hover(|item| item.bg(rgb(ui.raised_background)))
+            .when(agent.active, |item| item.bg(rgb(ui.raised_background)))
+            .when(blocked, |item| {
+                item.bg(with_alpha(ui.agent_blocked, 0.10))
+                    .border_color(with_alpha(ui.agent_blocked, 0.45))
+            })
+            .child(state_icon_element(agent.state, color, ("agent-icon", row)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(TEXT_LG))
+                            .text_color(rgb(ui.foreground))
+                            .child(agent.kind.label()),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(TEXT_SM))
+                            .text_color(rgb(ui.inactive_foreground))
+                            .child(agent.location),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(TEXT_SM))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(color))
+                    .child(agent.state.label()),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.focus_agent_pane(workspace_index, tab_index, pane_id, window, cx)
+            }));
+        // 縦線から各行へ短い横線を伸ばす
+        div()
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(8.0))
+                    .h(px(1.0))
+                    .bg(rgb(ui.strong_border)),
+            )
+            .child(item)
+            .into_any_element()
     }
 
     /// 画面下部のステータスライン。prefix 入力待ちのときはその旨を表示する。
@@ -1056,6 +1237,41 @@ fn bar_item(active: bool, label: String, config: &Config) -> gpui::Div {
         .child(div().min_w(px(0.0)).truncate().child(label))
 }
 
+/// 同梱の SVG アイコン（色は `text_color` で付ける）。
+fn icon(icon: Icon, size: f32) -> Svg {
+    svg().path(icon.path()).flex_none().size(px(size))
+}
+
+/// Agent の状態のアイコン。working は回し、blocked は点滅させて注意を引く。
+fn state_icon_element(state: AgentState, color: u32, id: impl Into<ElementId>) -> AnyElement {
+    let element = icon(state_icon(state), 14.0).text_color(rgb(color));
+    match state {
+        AgentState::Working => element
+            .with_animation(id, Animation::new(SPINNER_PERIOD).repeat(), |svg, delta| {
+                svg.with_transformation(Transformation::rotate(percentage(delta)))
+            })
+            .into_any_element(),
+        AgentState::Blocked => element
+            .with_animation(
+                id,
+                Animation::new(PULSE_PERIOD)
+                    .repeat()
+                    .with_easing(pulsating_between(0.35, 1.0)),
+                |svg, delta| svg.opacity(delta),
+            )
+            .into_any_element(),
+        AgentState::Done | AgentState::Idle => element.into_any_element(),
+    }
+}
+
+/// 色 `color` に不透明度 `alpha` を付ける。
+fn with_alpha(color: u32, alpha: f32) -> Rgba {
+    Rgba {
+        a: alpha,
+        ..rgb(color)
+    }
+}
+
 /// サイドバーで Agent の状態を表す色。
 fn state_color(ui: &UiColors, state: AgentState) -> u32 {
     match state {
@@ -1095,9 +1311,59 @@ fn workspace_label(index: usize) -> String {
     format!("Workspace {}", index + 1)
 }
 
-/// サイドバーで Agent がどの workspace・タブにいるかを表す。
-fn agent_location(workspace_index: usize, tab_index: usize, title: Option<&str>) -> String {
-    format!("W{} {}", workspace_index + 1, tab_label(tab_index, title))
+/// サイドバーで Agent が workspace の中のどのタブ・ペインにいるかを表す。
+/// `pane_number` はタブの中で左上から数えた 1 始まりの番号。
+fn agent_location(tab_index: usize, title: Option<&str>, pane_number: usize) -> String {
+    format!("{} · pane {pane_number}", tab_label(tab_index, title))
+}
+
+/// サイドバーの Agent の 1 行。
+#[derive(Debug, Clone)]
+struct AgentRow {
+    workspace_index: usize,
+    tab_index: usize,
+    pane_id: PaneId,
+    kind: AgentKind,
+    state: AgentState,
+    location: String,
+    /// ユーザーが今見ているペインか。
+    active: bool,
+}
+
+/// サイドバーの workspace ごとのまとまり。
+#[derive(Debug, Clone)]
+struct WorkspaceGroup {
+    index: usize,
+    active: bool,
+    agents: Vec<AgentRow>,
+}
+
+/// 状態ごとの Agent の数。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AgentCounts {
+    working: usize,
+    blocked: usize,
+    done: usize,
+    idle: usize,
+}
+
+impl AgentCounts {
+    fn of(groups: &[WorkspaceGroup]) -> Self {
+        let mut counts = Self::default();
+        for agent in groups.iter().flat_map(|group| &group.agents) {
+            *match agent.state {
+                AgentState::Working => &mut counts.working,
+                AgentState::Blocked => &mut counts.blocked,
+                AgentState::Done => &mut counts.done,
+                AgentState::Idle => &mut counts.idle,
+            } += 1;
+        }
+        counts
+    }
+
+    fn total(self) -> usize {
+        self.working + self.blocked + self.done + self.idle
+    }
 }
 
 fn window_title(title: Option<&str>) -> &str {
@@ -1107,7 +1373,8 @@ fn window_title(title: Option<&str>) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{App, TestAppContext, VisualTestContext};
+    use crate::agents::AgentTracker;
+    use gpui::{TestAppContext, VisualTestContext};
 
     fn sleep_options() -> SpawnOptions {
         SpawnOptions {
@@ -1536,9 +1803,165 @@ mod tests {
     }
 
     #[test]
-    fn agent_location_includes_workspace_and_tab() {
-        assert_eq!(agent_location(0, 1, Some("vim")), "W1 2: vim");
-        assert_eq!(agent_location(2, 0, None), "W3 1: shell");
+    fn agent_location_includes_tab_and_pane() {
+        assert_eq!(agent_location(1, Some("kugutsu"), 2), "2: kugutsu · pane 2");
+        assert_eq!(agent_location(0, None, 1), "1: shell · pane 1");
+    }
+
+    /// `workspace_index` 番目の workspace・`tab_index` 番目のタブの `pane_nth` 番目のペインに
+    /// Agent がいることにする（ポーリングを進めない限り上書きされない）。
+    fn set_agent(
+        workspace: &Entity<WorkspaceView>,
+        cx: &mut VisualTestContext,
+        (workspace_index, tab_index, pane_nth): (usize, usize, usize),
+        kind: AgentKind,
+        state: AgentState,
+    ) {
+        let view = workspace.read_with(cx, |w, _| {
+            let tab = w
+                .workspaces
+                .iter()
+                .nth(workspace_index)
+                .and_then(|ws| ws.tabs.iter().nth(tab_index))
+                .unwrap();
+            tab.panes.iter().nth(pane_nth).unwrap().1.view.clone()
+        });
+        view.update(cx, |view, _| {
+            view.set_agent(Some(AgentTracker { kind, state }))
+        });
+        workspace.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+    }
+
+    /// Agent が 3 つの workspace にまたがる状態。workspace 1 のタブ 1 は 2 ペイン。
+    fn open_workspace_with_agents(
+        cx: &mut TestAppContext,
+    ) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
+        let (workspace, cx) = open_workspace(cx);
+        cx.simulate_keystrokes("ctrl-b v");
+        cx.simulate_keystrokes("ctrl-b shift-c");
+        cx.simulate_keystrokes("ctrl-b shift-c");
+        cx.simulate_keystrokes("ctrl-b shift-n");
+        set_agent(
+            &workspace,
+            cx,
+            (0, 0, 0),
+            AgentKind::Codex,
+            AgentState::Blocked,
+        );
+        let claude = AgentKind::ClaudeCode;
+        set_agent(&workspace, cx, (0, 0, 1), claude, AgentState::Working);
+        set_agent(&workspace, cx, (1, 0, 0), claude, AgentState::Done);
+        (workspace, cx)
+    }
+
+    #[gpui::test]
+    fn agents_are_grouped_by_workspace(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_agents(cx);
+        let groups = workspace.read_with(cx, |w, cx| w.agent_groups(cx));
+        let summary: Vec<_> = groups
+            .iter()
+            .map(|group| {
+                let agents: Vec<_> = group
+                    .agents
+                    .iter()
+                    .map(|agent| (agent.kind, agent.state, agent.location.clone()))
+                    .collect();
+                (group.index, group.active, agents)
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (
+                    0,
+                    true,
+                    vec![
+                        (
+                            AgentKind::Codex,
+                            AgentState::Blocked,
+                            "1: shell · pane 1".to_string()
+                        ),
+                        (
+                            AgentKind::ClaudeCode,
+                            AgentState::Working,
+                            "1: shell · pane 2".to_string()
+                        ),
+                    ]
+                ),
+                (
+                    1,
+                    false,
+                    vec![(
+                        AgentKind::ClaudeCode,
+                        AgentState::Done,
+                        "1: shell · pane 1".to_string()
+                    )]
+                ),
+                (2, false, vec![]),
+            ]
+        );
+    }
+
+    #[gpui::test]
+    fn sidebar_lists_agents_under_their_workspace(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace_with_agents(cx);
+        let top = |cx: &mut VisualTestContext, selector| bounds(cx, selector).top();
+        let order = [
+            "agent-group-0",
+            "agent-0",
+            "agent-1",
+            "agent-group-1",
+            "agent-2",
+            "agent-group-2",
+        ];
+        let tops: Vec<_> = order.iter().map(|selector| top(cx, selector)).collect();
+        assert!(tops.windows(2).all(|pair| pair[0] < pair[1]), "{tops:?}");
+        // Agent のいない workspace は見出しだけ
+        assert!(cx.debug_bounds("agent-group-2-empty").is_some());
+        // Agent のいるアクティブな workspace には current と出す
+        assert!(cx.debug_bounds("agent-group-0-current").is_some());
+        // 見出しから Agent へ糸のような線でつなぐ
+        let strings = bounds(cx, "agent-group-0-strings");
+        assert!(strings.contains(&bounds(cx, "agent-1").center()));
+    }
+
+    #[gpui::test]
+    fn sidebar_header_counts_blocked_agents(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_agents(cx);
+        let (blocked, total) =
+            workspace.read_with(cx, |w, cx| w.sidebar_counts(&w.agent_groups(cx)));
+        assert_eq!(blocked.as_deref(), Some("1 blocked"));
+        assert_eq!(total, "3 total");
+        assert!(cx.debug_bounds("agents-blocked-count").is_some());
+    }
+
+    #[gpui::test]
+    fn sidebar_header_hides_blocked_count_without_blocked_agents(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("agents-blocked-count").is_none());
+        assert!(cx.debug_bounds("agent-group-0-empty").is_some());
+        let (blocked, total) =
+            workspace.read_with(cx, |w, cx| w.sidebar_counts(&w.agent_groups(cx)));
+        assert_eq!(blocked, None);
+        assert_eq!(total, "0 total");
+    }
+
+    #[gpui::test]
+    fn agents_are_counted_by_state(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_agents(cx);
+        let counts = workspace.read_with(cx, |w, cx| AgentCounts::of(&w.agent_groups(cx)));
+        assert_eq!(
+            counts,
+            AgentCounts {
+                working: 1,
+                blocked: 1,
+                done: 1,
+                idle: 0,
+            }
+        );
+        assert_eq!(counts.total(), 3);
     }
 
     #[gpui::test]

@@ -63,7 +63,7 @@ Kugutsu uses a tmux-style prefix key. Press the prefix `Ctrl-b`, then press one 
 | `Ctrl-b` `Ctrl-b` | Send `Ctrl-b` to the terminal |
 | `Esc`             | Cancel the prefix         |
 
-Keys without a binding are discarded after the prefix.
+Keys without a binding are discarded after the prefix. The prefix can be changed with `kugutsu.opt.prefix` (see [Configuration](#configuration)).
 
 ### Scrolling
 
@@ -74,3 +74,23 @@ Keys without a binding are discarded after the prefix.
 | `Shift-PageDown`         | Scroll down one page            |
 
 Typing returns to the bottom. New output keeps the current scroll position. Programs that enable mouse reporting receive wheel events, and full-screen programs such as `less` or `vim` receive them as arrow keys.
+
+## Configuration
+
+Kugutsu reads `$XDG_CONFIG_HOME/kugutsu/init.lua` (or `~/.config/kugutsu/init.lua` when `XDG_CONFIG_HOME` is not set) once on startup. The file is plain Lua 5.4. Without the file, every option keeps its default.
+
+```lua
+kugutsu.opt.prefix = "ctrl-a"
+kugutsu.opt.font_family = "JetBrains Mono"
+kugutsu.opt.font_size = 14
+kugutsu.opt.line_height = 1.3
+```
+
+| Option        | Type   | Default    | Description |
+| ------------- | ------ | ---------- | ----------- |
+| `prefix`      | string | `"ctrl-b"` | Prefix key, written like `ctrl-a` or `alt-space` |
+| `font_family` | string | first installed font of a built-in monospace list | Terminal font. If it is not installed, the built-in list is used |
+| `font_size`   | number | `14`       | Terminal font size in pixels |
+| `line_height` | number | `1.3`      | Line height as a multiple of the font size |
+
+Errors in `init.lua` — syntax errors, runtime errors, unknown options or values of the wrong type — are shown on the right of the status line, and Kugutsu keeps running. Options set before the error still apply; the rest keep their defaults.

@@ -2323,6 +2323,36 @@ mod tests {
             .unwrap_or_else(|| panic!("{selector} is rendered"))
     }
 
+    /// 今の状態を描くと `selector` の要素が出るか。
+    ///
+    /// gpui 0.2.2 は 2 枚のフレームを交互に描き直すが、`debug_bounds` は消さない。そのため一度
+    /// 描いた要素は、消えた後も `cx.debug_bounds` に残ることがある（描き直しの回数で変わる）。
+    /// 消えたことは、描いたことのない新しいウィンドウに同じルートのビューを描いて確かめる。
+    fn is_rendered(cx: &mut VisualTestContext, selector: &'static str) -> bool {
+        let root = cx
+            .update(|window, _| window.root::<WorkspaceView>())
+            .flatten()
+            .expect("the window shows a WorkspaceView");
+        let probe = cx.cx.update(|cx| {
+            let bounds = gpui::Bounds::maximized(None, cx);
+            cx.open_window(
+                gpui::WindowOptions {
+                    window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |_, _| root,
+            )
+            .unwrap()
+        });
+        let mut probe_cx = VisualTestContext::from_window(probe.into(), &cx.cx);
+        probe_cx.run_until_parked();
+        let rendered = probe_cx.debug_bounds(selector).is_some();
+        probe_cx.update(|window, _| window.remove_window());
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        rendered
+    }
+
     fn click(cx: &mut VisualTestContext, selector: &'static str) {
         let center = bounds(cx, selector).center();
         cx.simulate_click(center, gpui::Modifiers::none());
@@ -2694,7 +2724,22 @@ mod tests {
 
         cx.simulate_keystrokes("b");
         cx.run_until_parked();
-        assert!(cx.debug_bounds("which-key").is_none());
+        assert!(!is_rendered(cx, "which-key"));
+    }
+
+    /// prefix 待ちの間にターミナルの出力などで描き直されても、次のキーで which-key は消える。
+    #[gpui::test]
+    fn which_key_hides_after_redraw_while_armed(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace(cx);
+        cx.simulate_keystrokes("ctrl-b");
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        assert!(is_rendered(cx, "which-key"));
+
+        cx.simulate_keystrokes("b");
+        cx.run_until_parked();
+        assert!(!is_rendered(cx, "which-key"));
     }
 
     #[gpui::test]
@@ -2702,7 +2747,7 @@ mod tests {
         let (_workspace, cx) = open_workspace(cx);
         cx.simulate_keystrokes("ctrl-b z");
         cx.run_until_parked();
-        assert!(cx.debug_bounds("which-key").is_none());
+        assert!(!is_rendered(cx, "which-key"));
     }
 
     fn active_pane_count(workspace: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> usize {

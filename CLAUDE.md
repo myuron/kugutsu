@@ -20,6 +20,9 @@
   - `nix develop --command cargo clippy --all-targets --locked -- -D warnings`
   - `nix develop --command cargo test --all-targets --locked`
   - `nix flake check`（treefmt を含む）と `nix build`（サンドボックス内でテストも実行する）
+- Claude Code の hooks（`.claude/settings.json`）で次のチェックが自動で走る
+  - ファイルを編集すると、`.rs` は rustfmt、`.nix` は `nix fmt` で整形される
+  - 作業を終えるとき、Rust 関係の変更があれば clippy が走る。失敗したら直してから終える
 - `python3` は入っていない。ファイル編集にスクリプトを使わず、エディタのツールを使う
 
 ## 作業について

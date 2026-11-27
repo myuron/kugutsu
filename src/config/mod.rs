@@ -8,7 +8,7 @@ mod lua;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use gpui::Keystroke;
+use gpui::{Keystroke, Rgba, WindowBackgroundAppearance, rgb};
 
 use crate::tabs::prefix::DEFAULT_PREFIX;
 use crate::theme::Theme;
@@ -32,6 +32,31 @@ pub struct Config {
     pub line_height: f32,
     /// カラーテーマ。
     pub theme: Theme,
+    /// 背景の不透明度（0.0〜1.0）。ターミナルの既定の背景と UI のバーに掛ける。
+    pub background_opacity: f32,
+    /// 透過したウィンドウの後ろをぼかすようコンポジタに頼むか。
+    pub background_blur: bool,
+}
+
+impl Config {
+    /// ウィンドウの背景の種類。不透明度が 1 なら blur を指定していても不透明にする。
+    pub fn window_background(&self) -> WindowBackgroundAppearance {
+        if self.background_opacity >= 1.0 {
+            WindowBackgroundAppearance::Opaque
+        } else if self.background_blur {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Transparent
+        }
+    }
+
+    /// 背景色 `color` に背景の不透明度を掛けた色。
+    pub fn translucent(&self, color: u32) -> Rgba {
+        Rgba {
+            a: self.background_opacity,
+            ..rgb(color)
+        }
+    }
 }
 
 impl Default for Config {
@@ -42,6 +67,8 @@ impl Default for Config {
             font_size: 14.0,
             line_height: 1.3,
             theme: Theme::default(),
+            background_opacity: 1.0,
+            background_blur: false,
         }
     }
 }
@@ -154,6 +181,36 @@ mod tests {
             std::env::temp_dir().join(format!("kugutsu-config-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn window_background_follows_opacity_and_blur() {
+        let with = |background_opacity, background_blur| Config {
+            background_opacity,
+            background_blur,
+            ..Config::default()
+        };
+        use WindowBackgroundAppearance::{Blurred, Opaque, Transparent};
+        assert_eq!(Config::default().window_background(), Opaque);
+        assert_eq!(with(1.0, true).window_background(), Opaque);
+        assert_eq!(with(0.85, false).window_background(), Transparent);
+        assert_eq!(with(0.85, true).window_background(), Blurred);
+    }
+
+    #[test]
+    fn translucent_applies_the_background_opacity() {
+        let config = Config {
+            background_opacity: 0.5,
+            ..Config::default()
+        };
+        assert_eq!(
+            config.translucent(0x336699),
+            Rgba {
+                a: 0.5,
+                ..gpui::rgb(0x336699)
+            }
+        );
+        assert_eq!(Config::default().translucent(0x336699), gpui::rgb(0x336699));
     }
 
     #[test]

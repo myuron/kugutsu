@@ -33,6 +33,7 @@ fn main() {
         let bounds = Bounds::centered(None, size(px(800.0), px(500.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_background: config.config.window_background(),
             ..Default::default()
         };
         let opened = cx.open_window(options, |window, cx| {

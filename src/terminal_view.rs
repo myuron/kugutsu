@@ -135,6 +135,14 @@ impl TerminalView {
         }
     }
 
+    /// 読み込み直した設定のフォントと配色に切り替える。
+    pub fn apply_config(&mut self, config: &Config, window: &Window, cx: &mut Context<Self>) {
+        // グリッドのサイズは次の描画で新しいセルサイズから計算し直す
+        self.metrics = CellMetrics::measure(window, config);
+        self.colors = config.theme.terminal.clone();
+        cx.notify();
+    }
+
     /// プログラムが OSC で設定したタイトル。
     /// テーマのターミナル配色。
     #[cfg(test)]
@@ -856,6 +864,32 @@ mod tests {
                 TerminalView::new(terminal, events, &config, window, cx)
             });
             view.read_with(cx, |view, _| assert_eq!(view.colors, light.terminal));
+        }
+
+        #[gpui::test]
+        fn apply_config_replaces_metrics_and_colors(cx: &mut TestAppContext) {
+            let options = SpawnOptions {
+                program: Some(("sleep".into(), vec!["30".into()])),
+            };
+            let (terminal, events) = Terminal::spawn(options, INITIAL_SIZE).unwrap();
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                TerminalView::new(terminal, events, &Config::default(), window, cx)
+            });
+            let light = crate::theme::builtin("kugutsu-light").unwrap().clone();
+            let config = Config {
+                font_size: 20.0,
+                line_height: 1.5,
+                theme: light.clone(),
+                ..Config::default()
+            };
+            view.update_in(cx, |view, window, cx| {
+                view.apply_config(&config, window, cx)
+            });
+            view.read_with(cx, |view, _| {
+                assert_eq!(view.metrics.font_size, px(20.0));
+                assert_eq!(view.metrics.cell_height, px(30.0));
+                assert_eq!(view.colors, light.terminal);
+            });
         }
     }
 

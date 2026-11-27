@@ -10,6 +10,7 @@ use gpui::{
     pulsating_between, px, rgb, rgba, svg,
 };
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::agents::{AgentKind, AgentState};
@@ -117,17 +118,24 @@ pub struct WorkspaceView {
     missing_plugins: Vec<String>,
     /// UI に使うフォント。`None` なら gpui の既定。
     ui_font: Option<SharedString>,
+    /// `reload_config` で `init.lua` を読み込み直す関数。
+    load_config: ConfigLoader,
     _agent_poll: Task<()>,
 }
+
+/// 設定（`init.lua`）を読み込む関数。呼ぶたびに新しい Lua state で評価する。
+pub type ConfigLoader = Rc<dyn Fn() -> Loaded>;
 
 impl WorkspaceView {
     /// 起動済みのターミナルを最初のタブとして持つワークスペースを作る。
     /// 以降に開くタブ・ペインでは `spawn_options` のプログラムを起動する。
+    /// `config` は起動時に読み込んだ設定で、`reload_config` では `load_config` で読み込み直す。
     pub fn new(
         terminal: Terminal,
         events: UnboundedReceiver<Event>,
         spawn_options: SpawnOptions,
         config: Loaded,
+        load_config: ConfigLoader,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -137,11 +145,7 @@ impl WorkspaceView {
             missing_plugins,
         } = config;
         let first = Self::create_pane(terminal, events, &config, window, cx);
-        let ui_font = crate::font::resolve_ui_family(
-            config.ui_font_family.as_deref(),
-            &window.text_system().all_font_names(),
-        )
-        .map(SharedString::from);
+        let ui_font = resolve_ui_font(&config, window);
         let this = Self {
             workspaces: Tabs::new(Workspace::new(first)),
             keymap: PrefixKeymap::new(config.prefix.clone(), config.keymap.clone()),
@@ -149,6 +153,7 @@ impl WorkspaceView {
             config_errors,
             missing_plugins,
             ui_font,
+            load_config,
             spawn_options,
             sidebar_visible: true,
             keymap_help_visible: false,
@@ -352,6 +357,7 @@ impl WorkspaceView {
             Command::PrevWorkspace => self.workspaces.prev(),
             Command::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
             Command::ShowKeymap => self.keymap_help_visible = true,
+            Command::ReloadConfig => return self.reload_config(window, cx),
             Command::Focus(direction) => {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.panes.focus(direction);
@@ -359,6 +365,36 @@ impl WorkspaceView {
             }
         }
         self.activate(window, cx);
+        cx.notify();
+    }
+
+    /// `init.lua` を新しい Lua state で読み込み直し、動いているビューに反映する。
+    fn reload_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let loaded = (self.load_config)();
+        self.apply_config(loaded, window, cx);
+    }
+
+    fn apply_config(&mut self, loaded: Loaded, window: &mut Window, cx: &mut Context<Self>) {
+        let Loaded {
+            config,
+            errors,
+            missing_plugins,
+        } = loaded;
+        // キーマップごと置き換えるので、古い Lua 関数と一緒に古い Lua state も捨てられる
+        self.keymap = PrefixKeymap::new(config.prefix.clone(), config.keymap.clone());
+        self.ui_font = resolve_ui_font(&config, window);
+        window.set_background_appearance(config.window_background());
+        for workspace in self.workspaces.iter() {
+            for tab in workspace.tabs.iter() {
+                for (_, pane) in tab.panes.iter() {
+                    pane.view
+                        .update(cx, |view, cx| view.apply_config(&config, window, cx));
+                }
+            }
+        }
+        self.config = config;
+        self.config_errors = errors;
+        self.missing_plugins = missing_plugins;
         cx.notify();
     }
 
@@ -1535,6 +1571,15 @@ fn pane_border_color(theme: &Theme, active: bool) -> Rgba {
     })
 }
 
+/// 設定の UI フォントを、インストール済みのフォントから決める。
+fn resolve_ui_font(config: &Config, window: &Window) -> Option<SharedString> {
+    crate::font::resolve_ui_family(
+        config.ui_font_family.as_deref(),
+        &window.text_system().all_font_names(),
+    )
+    .map(SharedString::from)
+}
+
 /// ペインの不透明度。分割時に非アクティブなペインだけを薄くする。
 fn pane_opacity(config: &Config, state: PaneState) -> f32 {
     match state {
@@ -1653,6 +1698,7 @@ mod tests {
     use super::*;
     use crate::agents::AgentTracker;
     use gpui::{TestAppContext, VisualTestContext};
+    use std::cell::RefCell;
 
     fn sleep_options() -> SpawnOptions {
         SpawnOptions {
@@ -1673,9 +1719,26 @@ mod tests {
         first: SpawnOptions,
         config: Loaded,
     ) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
+        open_workspace_with_loader(cx, first, config, Rc::new(Loaded::default))
+    }
+
+    fn open_workspace_with_loader(
+        cx: &mut TestAppContext,
+        first: SpawnOptions,
+        config: Loaded,
+        load_config: ConfigLoader,
+    ) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
         let (terminal, events) = Terminal::spawn(first, INITIAL_SIZE).unwrap();
         cx.add_window_view(|window, cx| {
-            WorkspaceView::new(terminal, events, sleep_options(), config, window, cx)
+            WorkspaceView::new(
+                terminal,
+                events,
+                sleep_options(),
+                config,
+                load_config,
+                window,
+                cx,
+            )
         })
     }
 
@@ -1686,6 +1749,154 @@ mod tests {
     ) -> (Entity<WorkspaceView>, &'a mut VisualTestContext) {
         let config = crate::config::evaluate(init_lua, crate::config::FILE_NAME);
         open_workspace_with_config(cx, sleep_options(), config)
+    }
+
+    /// 書き換えられる `init.lua` の内容から設定を読み込んでワークスペースを開く。
+    /// 返す `RefCell` を書き換えてから `reload_config` すると、その内容を読み込み直す。
+    fn open_reloadable_workspace<'a>(
+        cx: &'a mut TestAppContext,
+        init_lua: &str,
+    ) -> (
+        Entity<WorkspaceView>,
+        &'a mut VisualTestContext,
+        Rc<RefCell<String>>,
+    ) {
+        let source = Rc::new(RefCell::new(init_lua.to_string()));
+        let load: ConfigLoader = Rc::new({
+            let source = source.clone();
+            move || crate::config::evaluate(&source.borrow(), crate::config::FILE_NAME)
+        });
+        let (workspace, cx) = open_workspace_with_loader(cx, sleep_options(), load(), load);
+        (workspace, cx, source)
+    }
+
+    #[gpui::test]
+    fn reload_applies_the_new_prefix(cx: &mut TestAppContext) {
+        let (workspace, cx, source) = open_reloadable_workspace(cx, "");
+        *source.borrow_mut() = r#"kugutsu.opt.prefix = "ctrl-a""#.into();
+        cx.simulate_keystrokes("ctrl-b r");
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.prefix_label()),
+            "ctrl-a"
+        );
+        cx.simulate_keystrokes("ctrl-b c");
+        assert_eq!(active_tab_count(&workspace, cx), 1);
+        cx.simulate_keystrokes("ctrl-a c");
+        assert_eq!(active_tab_count(&workspace, cx), 2);
+    }
+
+    #[gpui::test]
+    fn reload_replaces_lua_mappings(cx: &mut TestAppContext) {
+        let (workspace, cx, source) = open_reloadable_workspace(
+            cx,
+            r#"kugutsu.keymap.set("<prefix>w", function() kugutsu.action.new_tab() end)"#,
+        );
+        cx.simulate_keystrokes("ctrl-b w");
+        assert_eq!(active_tab_count(&workspace, cx), 2);
+        *source.borrow_mut() =
+            r#"kugutsu.keymap.set("<prefix>w", function() kugutsu.action.split_horizontal() end)"#
+                .into();
+        cx.simulate_keystrokes("ctrl-b r ctrl-b w");
+        assert_eq!(active_tab_count(&workspace, cx), 2);
+        assert_eq!(active_pane_count(&workspace, cx), 2);
+    }
+
+    #[gpui::test]
+    fn reload_can_be_called_from_a_lua_mapping(cx: &mut TestAppContext) {
+        let (workspace, cx, source) = open_reloadable_workspace(
+            cx,
+            r#"kugutsu.keymap.set("<prefix>u", function() kugutsu.action.reload_config() end)"#,
+        );
+        *source.borrow_mut() = r#"kugutsu.opt.font_size = 20"#.into();
+        cx.simulate_keystrokes("ctrl-b u");
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.config.font_size, 20.0)
+        });
+        // 読み込み直した設定には `<prefix>u` が無い
+        assert!(workspace.read_with(cx, |workspace, _| {
+            workspace
+                .keymap
+                .keymap()
+                .lookup(&crate::tabs::prefix::Trigger::parse("<prefix>u").unwrap())
+                .is_none()
+        }));
+    }
+
+    #[gpui::test]
+    fn reload_shows_errors_and_keeps_values_set_before_them(cx: &mut TestAppContext) {
+        let (workspace, cx, source) = open_reloadable_workspace(cx, "");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("config-error").is_none());
+        *source.borrow_mut() = "kugutsu.opt.font_size = 20\nkugutsu.opt.foo = 1\n\
+                                kugutsu.opt.line_height = 2"
+            .into();
+        cx.simulate_keystrokes("ctrl-b r");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("config-error").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.config_error_message().as_deref(),
+                Some("init.lua:2: unknown option 'foo'")
+            );
+            assert_eq!(workspace.config.font_size, 20.0);
+            assert_eq!(workspace.config.line_height, Config::default().line_height);
+        });
+
+        // 直して読み込み直すとエラーは消える（gpui の debug_bounds は一度描いた要素を
+        // 消さないので、表示ではなく状態で確かめる）
+        *source.borrow_mut() = "kugutsu.opt.font_size = 20".into();
+        cx.simulate_keystrokes("ctrl-b r");
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.config_error_message()),
+            None
+        );
+    }
+
+    #[gpui::test]
+    fn reload_updates_missing_plugins(cx: &mut TestAppContext) {
+        let load: ConfigLoader = Rc::new(|| Loaded {
+            missing_plugins: vec!["a.kugutsu".into()],
+            ..Loaded::default()
+        });
+        let (workspace, cx) =
+            open_workspace_with_loader(cx, sleep_options(), Loaded::default(), load);
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.missing_plugins_message()),
+            None
+        );
+        cx.simulate_keystrokes("ctrl-b r");
+        assert!(
+            workspace
+                .read_with(cx, |workspace, _| workspace.missing_plugins_message())
+                .is_some()
+        );
+    }
+
+    #[gpui::test]
+    fn reload_applies_the_theme_to_every_pane(cx: &mut TestAppContext) {
+        let (workspace, cx, source) = open_reloadable_workspace(cx, "");
+        cx.simulate_keystrokes("ctrl-b v ctrl-b c");
+        *source.borrow_mut() = r#"kugutsu.opt.theme = "kugutsu-light"
+            kugutsu.opt.background_opacity = 0.8"#
+            .into();
+        cx.simulate_keystrokes("ctrl-b r");
+        let light = crate::theme::builtin("kugutsu-light").unwrap().clone();
+        let views: Vec<_> = workspace.read_with(cx, |workspace, _| {
+            workspace
+                .workspaces
+                .iter()
+                .flat_map(|workspace| workspace.tabs.iter())
+                .flat_map(|tab| tab.panes.iter().map(|(_, pane)| pane.view.clone()))
+                .collect()
+        });
+        assert_eq!(views.len(), 3);
+        for view in views {
+            view.read_with(cx, |view, _| assert_eq!(view.colors(), &light.terminal));
+        }
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(workspace.config.theme, light);
+            assert_eq!(workspace.config.background_opacity, 0.8);
+        });
     }
 
     #[gpui::test]

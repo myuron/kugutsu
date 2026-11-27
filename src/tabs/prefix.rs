@@ -39,6 +39,8 @@ pub enum Command {
     PrevWorkspace,
     /// キーマップの一覧を表示する。
     ShowKeymap,
+    /// `init.lua` を読み込み直す。
+    ReloadConfig,
 }
 
 impl Command {
@@ -59,6 +61,7 @@ impl Command {
         ("next_workspace", Command::NextWorkspace),
         ("prev_workspace", Command::PrevWorkspace),
         ("show_keymap", Command::ShowKeymap),
+        ("reload_config", Command::ReloadConfig),
     ];
 
     /// 設定で使う名前。引数のある操作（`SelectTab`）は名前を持たない。
@@ -97,6 +100,7 @@ impl Command {
             Command::NextWorkspace => "Next workspace",
             Command::PrevWorkspace => "Previous workspace",
             Command::ShowKeymap => "Show key bindings",
+            Command::ReloadConfig => "Reload init.lua",
         }
     }
 }
@@ -136,7 +140,7 @@ impl Command {
             Command::NewWorkspace | Command::NextWorkspace | Command::PrevWorkspace => {
                 Group::Workspaces
             }
-            Command::ToggleSidebar | Command::ShowKeymap => Group::General,
+            Command::ToggleSidebar | Command::ShowKeymap | Command::ReloadConfig => Group::General,
         }
     }
 }
@@ -243,6 +247,7 @@ const DEFAULT_KEYS: &[(&str, Command)] = &[
     ("shift-n", Command::NextWorkspace),
     ("shift-p", Command::PrevWorkspace),
     ("?", Command::ShowKeymap),
+    ("r", Command::ReloadConfig),
 ];
 
 /// キーの割り当ての一覧（並びは表示順）。
@@ -558,6 +563,7 @@ mod tests {
             ("shift-n", Command::NextWorkspace),
             ("shift-p", Command::PrevWorkspace),
             ("?", Command::ShowKeymap),
+            ("r", Command::ReloadConfig),
         ];
         for (key, expected) in cases {
             let mut keymap = PrefixKeymap::default();
@@ -644,6 +650,7 @@ mod tests {
             ("next_workspace", Command::NextWorkspace),
             ("prev_workspace", Command::PrevWorkspace),
             ("show_keymap", Command::ShowKeymap),
+            ("reload_config", Command::ReloadConfig),
         ];
         assert_eq!(Command::NAMED.len(), named.len());
         for (name, expected) in named {
@@ -773,8 +780,9 @@ mod tests {
             ]
         );
         assert!(entries.contains(&pair("?", "Show key bindings")));
+        assert!(entries.contains(&pair("r", "Reload init.lua")));
         assert!(entries.contains(&pair("shift-c", "New workspace")));
-        assert_eq!(entries.len(), 16);
+        assert_eq!(entries.len(), 17);
     }
 
     #[test]
@@ -813,6 +821,7 @@ mod tests {
         assert_eq!(Command::PrevWorkspace.group(), Group::Workspaces);
         assert_eq!(Command::ToggleSidebar.group(), Group::General);
         assert_eq!(Command::ShowKeymap.group(), Group::General);
+        assert_eq!(Command::ReloadConfig.group(), Group::General);
         assert_eq!(Group::Workspaces.label(), "Workspaces");
     }
 

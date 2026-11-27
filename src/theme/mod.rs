@@ -115,23 +115,72 @@ pub fn builtin(name: &str) -> Option<&'static Theme> {
     BUILTIN.iter().find(|theme| theme.name == name)
 }
 
-/// 名前からテーマを探す。`dirs`（`colors/` ディレクトリ）を順に見て `<name>.lua` があれば
-/// それを読み、どこにも無ければ同梱テーマを使う。
-pub fn find(name: &str, dirs: &[PathBuf]) -> Result<Theme, String> {
-    let unknown = || format!("unknown theme '{name}'");
-    // ファイル名としてだけ使い、ほかのディレクトリを指せないようにする
-    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
-        return Err(unknown());
+/// テーマの探し先。
+#[derive(Debug, Clone, Default)]
+pub struct Catalog {
+    /// ユーザーの `colors/`（`~/.config/kugutsu/colors/`）。
+    pub user_dir: Option<PathBuf>,
+    /// `kugutsu.theme.register` で登録したテーマ（登録順）。
+    pub registered: Vec<Theme>,
+    /// 読み込んだプラグインの `colors/`（spec の順）。
+    pub plugin_dirs: Vec<PathBuf>,
+}
+
+impl Catalog {
+    /// 名前からテーマを探す。ユーザーの `colors/<name>.lua`、登録したテーマ（後勝ち）、
+    /// プラグインの `colors/<name>.lua`、同梱テーマの順に見て、最初に見つかったものを使う。
+    pub fn find(&self, name: &str) -> Result<Theme, String> {
+        // ファイル名としてだけ使い、ほかのディレクトリを指せないようにする
+        let file_name = !(name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']));
+        if file_name && let Some(theme) = read_from(name, &self.user_dir)? {
+            return Ok(theme);
+        }
+        if let Some(theme) = self.registered.iter().rev().find(|t| t.name == name) {
+            return Ok(theme.clone());
+        }
+        if file_name && let Some(theme) = read_from(name, &self.plugin_dirs)? {
+            return Ok(theme);
+        }
+        builtin(name)
+            .cloned()
+            .ok_or_else(|| format!("unknown theme '{name}'"))
     }
+}
+
+/// `dirs` を順に見て、最初にある `<name>.lua` を読む。
+fn read_from<'a>(
+    name: &str,
+    dirs: impl IntoIterator<Item = &'a PathBuf>,
+) -> Result<Option<Theme>, String> {
     for dir in dirs {
         let path = dir.join(format!("{name}.lua"));
         match std::fs::read_to_string(&path) {
-            Ok(source) => return parse(&source, name),
+            Ok(source) => return parse(&source, name).map(Some),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(format!("{}: {err}", path.display())),
         }
     }
-    builtin(name).cloned().ok_or_else(unknown)
+    Ok(None)
+}
+
+/// Lua の table から名前付きのテーマを作る（`kugutsu.theme.register` 用）。
+/// `name` は必須で、書いていない色は既定のテーマの色にする。
+pub fn from_table(value: &Value) -> Result<Theme, String> {
+    let name = match optional(&table(value)?, "", "name")? {
+        Some(Value::String(name)) => name.to_string_lossy(),
+        Some(other) => {
+            return Err(format!(
+                "name: expected string, got {}",
+                config::lua_type_name(&other)
+            ));
+        }
+        None => return Err("name: missing".to_string()),
+    };
+    if name.is_empty() {
+        return Err("name: must not be empty".to_string());
+    }
+    let patch = patch(value).map_err(|err| format!("{name}: {err}"))?;
+    Ok(build(&patch, &name))
 }
 
 /// テーマファイルを評価してテーマを読み込む。`name` はテーマ名で、エラーメッセージにも使う。

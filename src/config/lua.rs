@@ -18,7 +18,8 @@ use crate::theme;
 /// `kugutsu` グローバルを組み立てる Lua コード。`set` / `get` などは Rust の関数で、
 /// 不正な値ならエラーメッセージを返す。`error(..., 2)` で呼び出した行をエラー位置にする。
 const PRELUDE: &str = r#"
-local set, get, ui_set, ui_get, keymap_set, keymap_del, action, action_names, plugins_setup = ...
+local set, get, ui_set, ui_get, keymap_set, keymap_del, action, action_names, plugins_setup,
+    theme_register = ...
 local function check(err)
     if err then error(err, 3) end
 end
@@ -59,7 +60,19 @@ local plugins = {
         check(plugins_setup(spec))
     end,
 }
-kugutsu = { opt = opt, ui = ui, keymap = keymap, action = actions, plugins = plugins }
+local theme = {
+    register = function(t)
+        check(theme_register(t))
+    end,
+}
+kugutsu = {
+    opt = opt,
+    ui = ui,
+    keymap = keymap,
+    action = actions,
+    plugins = plugins,
+    theme = theme,
+}
 -- Lua 5.4 の require はローダーのデータ（ファイルのパス）も返すので、
 -- `setup({ "a/b", require("plugins.ui") })` のように table の最後に書いても値が 1 つになるようにする
 local lua_require = require
@@ -79,6 +92,8 @@ struct State {
     config: Config,
     /// `kugutsu.opt.theme` に代入された名前。テーマはプラグインを読み込んだ後に引く。
     theme: Option<String>,
+    /// `kugutsu.theme.register` で登録したテーマ（登録順）。
+    registered_themes: Vec<theme::Theme>,
     /// 最後の `kugutsu.plugins.setup` で宣言したプラグイン。
     plugins: Vec<PluginSpec>,
 }
@@ -172,28 +187,33 @@ fn evaluate_in(
     let plugins = std::mem::take(&mut state.borrow_mut().plugins);
     let specs = plugins.iter().map(|plugin| plugin.spec.clone()).collect();
     let mut missing_plugins = Vec::new();
-    let mut color_dirs: Vec<_> = paths
-        .map(|p| p.config_dir.join("colors"))
-        .into_iter()
-        .collect();
+    let mut plugin_color_dirs = Vec::new();
     if let (true, Some(lua_path)) = (load_plugins, &lua_path) {
         // プラグインも `kugutsu.opt` などに書き込むので、設定を取り出す前に読み込む
         let plugins_dir = paths.and_then(|paths| paths.plugins_dir.as_deref());
         let report = loader::load(&lua, &plugins, lua_path, plugins_dir);
         errors.extend(report.errors);
         missing_plugins = report.missing;
-        color_dirs.extend(report.color_dirs);
+        plugin_color_dirs = report.color_dirs;
     }
     drop(plugins);
 
     // Lua に登録した関数は `state` を持ち続ける。割り当てた Lua 関数は Lua 本体を持つので、
     // 中身を取り出して Lua → `state` → Lua の循環参照を作らない
     let State {
-        mut config, theme, ..
+        mut config,
+        theme,
+        registered_themes,
+        ..
     } = std::mem::take(&mut *state.borrow_mut());
     if let (true, Some(name)) = (load_plugins, theme) {
-        // テーマは init.lua とプラグインの後に引くので、setup と opt.theme の順序は問わない
-        match theme::find(&name, &color_dirs) {
+        // テーマは init.lua とプラグインの後に引くので、setup・register と opt.theme の順序は問わない
+        let catalog = theme::Catalog {
+            user_dir: paths.map(|paths| paths.config_dir.join("colors")),
+            registered: registered_themes,
+            plugin_dirs: plugin_color_dirs,
+        };
+        match catalog.find(&name) {
             Ok(theme) => config.theme = theme,
             Err(err) => errors.push(format!("kugutsu.opt.theme: {err}")),
         }
@@ -251,6 +271,16 @@ fn prepare(lua: &Lua, state: &SharedState, paths: Option<&Paths>) -> mlua::Resul
             Err(err) => Some(format!("kugutsu.plugins.setup: {err}")),
         })
     })?;
+    let target = Rc::clone(state);
+    let theme_register = lua.create_function(move |_, value: Value| {
+        Ok(match theme::from_table(&value) {
+            Ok(theme) => {
+                target.borrow_mut().registered_themes.push(theme);
+                None
+            }
+            Err(err) => Some(format!("kugutsu.theme.register: {err}")),
+        })
+    })?;
     lua.load(PRELUDE).set_name("=prelude").call::<()>((
         set,
         get,
@@ -261,6 +291,7 @@ fn prepare(lua: &Lua, state: &SharedState, paths: Option<&Paths>) -> mlua::Resul
         action,
         action_names,
         plugins_setup,
+        theme_register,
     ))?;
     LuaPath::install(lua, paths.map(|paths| paths.config_dir.as_path()))
 }
@@ -706,6 +737,62 @@ mod tests {
         eval_err(
             "kugutsu.opt.theme = 1",
             "kugutsu.opt.theme: expected string, got number",
+        );
+    }
+
+    #[test]
+    fn selects_a_registered_theme() {
+        // register と opt.theme の順序は問わない
+        let config = eval_ok(
+            r##"kugutsu.opt.theme = "mine"
+            kugutsu.theme.register({ name = "mine", ui = { error = "#010203" } })"##,
+        );
+        assert_eq!(config.theme.name, "mine");
+        assert_eq!(config.theme.ui.error, 0x010203);
+        // 書いていない色は既定のテーマから
+        assert_eq!(config.theme.terminal, Theme::default().terminal);
+    }
+
+    #[test]
+    fn later_registration_wins_and_shadows_bundled_themes() {
+        let config = eval_ok(
+            r##"kugutsu.theme.register({ name = "kugutsu-light", ui = { error = "#000001" } })
+            kugutsu.theme.register({ name = "kugutsu-light", ui = { error = "#000002" } })
+            kugutsu.opt.theme = "kugutsu-light""##,
+        );
+        assert_eq!(config.theme.ui.error, 0x000002);
+    }
+
+    #[test]
+    fn invalid_registrations_are_errors() {
+        for (source, expected) in [
+            ("kugutsu.theme.register(1)", "expected a table, got number"),
+            ("kugutsu.theme.register({})", "name: missing"),
+            (
+                "kugutsu.theme.register({ name = 1 })",
+                "name: expected string, got number",
+            ),
+            (
+                r#"kugutsu.theme.register({ name = "" })"#,
+                "name: must not be empty",
+            ),
+            (
+                r#"kugutsu.theme.register({ name = "x", ui = { error = "red" } })"#,
+                "x: ui.error: expected a color",
+            ),
+        ] {
+            let config = eval_err(source, "init.lua:1: kugutsu.theme.register: ");
+            eval_err(source, expected);
+            assert_eq!(config.theme, Theme::default());
+        }
+        // 登録に失敗したテーマは選べない
+        let loaded = eval(
+            r#"pcall(kugutsu.theme.register, { name = "x", ui = { error = "red" } })
+            kugutsu.opt.theme = "x""#,
+        );
+        assert_eq!(
+            loaded.errors,
+            vec!["kugutsu.opt.theme: unknown theme 'x'".to_string()]
         );
     }
 

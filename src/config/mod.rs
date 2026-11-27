@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use gpui::Keystroke;
 
 use crate::tabs::prefix::DEFAULT_PREFIX;
+use crate::theme::Theme;
 
 pub use lua::evaluate;
 pub(crate) use lua::{error_message, lua_type_name};
@@ -29,6 +30,8 @@ pub struct Config {
     pub font_size: f32,
     /// フォントサイズに対する行の高さの比。
     pub line_height: f32,
+    /// カラーテーマ。
+    pub theme: Theme,
 }
 
 impl Default for Config {
@@ -38,6 +41,7 @@ impl Default for Config {
             font_family: None,
             font_size: 14.0,
             line_height: 1.3,
+            theme: Theme::default(),
         }
     }
 }

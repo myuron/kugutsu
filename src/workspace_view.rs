@@ -16,8 +16,9 @@ use crate::panes::{Axis, Node, PaneId, Panes};
 use crate::tabs::Tabs;
 use crate::tabs::prefix::{Command, KeyOutcome, PrefixKeymap, bindings};
 use crate::terminal::size::GridSize;
-use crate::terminal::{SpawnOptions, Terminal, colors};
+use crate::terminal::{SpawnOptions, Terminal};
 use crate::terminal_view::{TerminalView, TerminalViewEvent};
+use crate::theme::{Theme, UiColors};
 
 /// 起動直後の仮サイズ。最初の描画で表示領域に合わせてリサイズされる。
 pub const INITIAL_SIZE: GridSize = GridSize {
@@ -37,20 +38,9 @@ const BAR_ITEM_WIDTH: f32 = 140.0;
 /// バー右端の `<` `>` ボタンの幅。
 const SCROLL_BUTTON_WIDTH: f32 = 24.0;
 const STATUS_LINE_HEIGHT: f32 = 22.0;
-const BAR_BACKGROUND: u32 = 0x181818;
-const BAR_BORDER: u32 = 0x2b2b2b;
-const INACTIVE_TAB_FOREGROUND: u32 = 0x8a8a8a;
-const PREFIX_INDICATOR: u32 = 0xdcdcaa;
-/// 設定（`init.lua`）のエラーの文字色。
-const CONFIG_ERROR_COLOR: u32 = 0xf14c4c;
-/// 分割時にアクティブなペインを囲む枠の色。
-const ACTIVE_PANE_BORDER: u32 = 0x569cd6;
 const SIDEBAR_WIDTH: f32 = 220.0;
 /// Agent の状態を調べる間隔。
 const AGENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const WORKING_COLOR: u32 = 0x569cd6;
-const BLOCKED_COLOR: u32 = 0xe5c07b;
-const DONE_COLOR: u32 = 0x89d185;
 /// キーマップ一覧の後ろに敷く半透明の背景（RGBA）。
 const KEYMAP_BACKDROP: u32 = 0x000000aa;
 /// キーマップ一覧のキー列の幅。
@@ -480,21 +470,27 @@ impl WorkspaceView {
     /// タブバーの上に置く workspace の一覧。クリックでその workspace へ切り替える。
     fn render_workspace_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active_index = self.workspaces.active_index();
-        let items = (0..self.workspaces.iter().count())
-            .map(|index| {
-                bar_item(index == active_index, workspace_label(index))
+        let items =
+            (0..self.workspaces.iter().count())
+                .map(|index| {
+                    bar_item(
+                        index == active_index,
+                        workspace_label(index),
+                        &self.config.theme,
+                    )
                     .id(("workspace", index))
                     .debug_selector(|| format!("workspace-{index}"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.select_workspace(index, window, cx)
                     }))
-            })
-            .collect();
+                })
+                .collect();
         scrollable_bar(
             "workspace",
             WORKSPACE_BAR_HEIGHT,
             &self.workspace_scroll,
             items,
+            &self.config.theme,
             cx,
         )
     }
@@ -506,16 +502,27 @@ impl WorkspaceView {
             for (index, tab) in tabs.iter().enumerate() {
                 let title = tab.active_view().and_then(|view| view.read(cx).title());
                 items.push(
-                    bar_item(index == active_index, tab_label(index, title))
-                        .id(("tab", index))
-                        .debug_selector(|| format!("tab-{index}"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.run(Command::SelectTab(index), window, cx)
-                        })),
+                    bar_item(
+                        index == active_index,
+                        tab_label(index, title),
+                        &self.config.theme,
+                    )
+                    .id(("tab", index))
+                    .debug_selector(|| format!("tab-{index}"))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run(Command::SelectTab(index), window, cx)
+                    })),
                 );
             }
         }
-        scrollable_bar("tab", TAB_BAR_HEIGHT, &self.tab_scroll, items, cx)
+        scrollable_bar(
+            "tab",
+            TAB_BAR_HEIGHT,
+            &self.tab_scroll,
+            items,
+            &self.config.theme,
+            cx,
+        )
     }
 
     /// アクティブなタブのペインを分割どおりに並べる。
@@ -524,7 +531,7 @@ impl WorkspaceView {
         let root = panes.root()?;
         // ペインが 1 つだけなら枠で強調する必要は無い
         let highlight = matches!(root, Node::Split { .. }).then_some(panes.active_id());
-        Some(render_node(root, highlight, cx))
+        Some(render_node(root, highlight, &self.config.theme, cx))
     }
 
     /// 全 workspace・全タブ・全ペインで動いている Agent の一覧。クリックでそのペインへ移る。
@@ -552,7 +559,7 @@ impl WorkspaceView {
                 let Some(agent) = view.agent() else { continue };
                 let location = agent_location(workspace_index, tab_index, view.title());
                 let active = active_tab && pane_id == tab.panes.active_id();
-                let color = rgb(state_color(agent.state));
+                let color = rgb(state_color(&self.config.theme.ui, agent.state));
                 let index = rows.len();
                 let row = div()
                     .id(("agent", index))
@@ -563,7 +570,9 @@ impl WorkspaceView {
                     .px(px(10.0))
                     .py(px(6.0))
                     .cursor_pointer()
-                    .when(active, |row| row.bg(rgb(colors::DEFAULT_BACKGROUND)))
+                    .when(active, |row| {
+                        row.bg(rgb(self.config.theme.terminal.background))
+                    })
                     .child(
                         div()
                             .flex()
@@ -573,14 +582,14 @@ impl WorkspaceView {
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_color(rgb(colors::DEFAULT_FOREGROUND))
+                                    .text_color(rgb(self.config.theme.terminal.foreground))
                                     .child(agent.kind.label()),
                             )
                             .child(div().text_color(color).child(agent.state.label())),
                     )
                     .child(
                         div()
-                            .text_color(rgb(INACTIVE_TAB_FOREGROUND))
+                            .text_color(rgb(self.config.theme.ui.inactive_foreground))
                             .truncate()
                             .child(location),
                     )
@@ -599,9 +608,9 @@ impl WorkspaceView {
             .h_full()
             .overflow_hidden()
             .text_size(px(12.0))
-            .bg(rgb(BAR_BACKGROUND))
+            .bg(rgb(self.config.theme.ui.bar_background))
             .border_r_1()
-            .border_color(rgb(BAR_BORDER))
+            .border_color(rgb(self.config.theme.ui.bar_border))
             .child(
                 // workspace ライン＋タブバーと高さ・下線を揃える
                 div()
@@ -611,15 +620,15 @@ impl WorkspaceView {
                     .h(px(WORKSPACE_BAR_HEIGHT + TAB_BAR_HEIGHT))
                     .px(px(10.0))
                     .border_b_1()
-                    .border_color(rgb(BAR_BORDER))
-                    .text_color(rgb(INACTIVE_TAB_FOREGROUND))
+                    .border_color(rgb(self.config.theme.ui.bar_border))
+                    .text_color(rgb(self.config.theme.ui.inactive_foreground))
                     .child("AGENTS"),
             )
             .when(rows.is_empty(), |sidebar| {
                 sidebar.child(
                     div()
                         .px(px(10.0))
-                        .text_color(rgb(INACTIVE_TAB_FOREGROUND))
+                        .text_color(rgb(self.config.theme.ui.inactive_foreground))
                         .child("No agents"),
                 )
             })
@@ -636,13 +645,13 @@ impl WorkspaceView {
             .h(px(STATUS_LINE_HEIGHT))
             .px(px(12.0))
             .text_size(px(12.0))
-            .bg(rgb(BAR_BACKGROUND))
+            .bg(rgb(self.config.theme.ui.bar_background))
             .border_t_1()
-            .border_color(rgb(BAR_BORDER))
+            .border_color(rgb(self.config.theme.ui.bar_border))
             .when(self.keymap.is_armed(), |line| {
                 line.child(
                     div()
-                        .text_color(rgb(PREFIX_INDICATOR))
+                        .text_color(rgb(self.config.theme.ui.prefix_indicator))
                         .child(self.prefix_label()),
                 )
             })
@@ -652,7 +661,7 @@ impl WorkspaceView {
                     .ml_auto()
                     .min_w(px(0.0))
                     .truncate()
-                    .text_color(rgb(CONFIG_ERROR_COLOR))
+                    .text_color(rgb(self.config.theme.ui.error))
                     .child(message)
             }))
     }
@@ -682,14 +691,14 @@ impl WorkspaceView {
                     div()
                         .flex_none()
                         .w(px(WHICH_KEY_KEY_WIDTH))
-                        .text_color(rgb(PREFIX_INDICATOR))
+                        .text_color(rgb(self.config.theme.ui.prefix_indicator))
                         .child(key),
                 )
                 .child(
                     div()
                         .min_w(px(0.0))
                         .truncate()
-                        .text_color(rgb(colors::DEFAULT_FOREGROUND))
+                        .text_color(rgb(self.config.theme.terminal.foreground))
                         .child(description),
                 )
         });
@@ -705,9 +714,9 @@ impl WorkspaceView {
             .px(px(12.0))
             .py(px(8.0))
             .text_size(px(12.0))
-            .bg(rgb(BAR_BACKGROUND))
+            .bg(rgb(self.config.theme.ui.bar_background))
             .border_t_1()
-            .border_color(rgb(BAR_BORDER))
+            .border_color(rgb(self.config.theme.ui.bar_border))
             .children(items)
     }
 
@@ -722,12 +731,12 @@ impl WorkspaceView {
                     div()
                         .w(px(KEYMAP_KEY_COLUMN_WIDTH))
                         .flex_none()
-                        .text_color(rgb(PREFIX_INDICATOR))
+                        .text_color(rgb(self.config.theme.ui.prefix_indicator))
                         .child(format!("{prefix} {key}")),
                 )
                 .child(
                     div()
-                        .text_color(rgb(colors::DEFAULT_FOREGROUND))
+                        .text_color(rgb(self.config.theme.terminal.foreground))
                         .child(description),
                 )
         });
@@ -740,20 +749,20 @@ impl WorkspaceView {
             .gap(px(4.0))
             .p(px(16.0))
             .text_size(px(12.0))
-            .bg(rgb(BAR_BACKGROUND))
+            .bg(rgb(self.config.theme.ui.bar_background))
             .border_1()
-            .border_color(rgb(BAR_BORDER))
+            .border_color(rgb(self.config.theme.ui.bar_border))
             .child(
                 div()
                     .pb(px(8.0))
-                    .text_color(rgb(INACTIVE_TAB_FOREGROUND))
+                    .text_color(rgb(self.config.theme.ui.inactive_foreground))
                     .child("KEY BINDINGS"),
             )
             .children(rows)
             .child(
                 div()
                     .pt(px(8.0))
-                    .text_color(rgb(INACTIVE_TAB_FOREGROUND))
+                    .text_color(rgb(self.config.theme.ui.inactive_foreground))
                     .child("esc / q to close"),
             );
         div()
@@ -776,6 +785,7 @@ impl WorkspaceView {
 fn render_node(
     node: &Node<Pane>,
     highlight: Option<PaneId>,
+    theme: &Theme,
     cx: &mut Context<WorkspaceView>,
 ) -> AnyElement {
     match node {
@@ -784,11 +794,8 @@ fn render_node(
             div()
                 .size_full()
                 .when_some(highlight, |pane, active| {
-                    pane.border_1().border_color(rgb(if id == active {
-                        ACTIVE_PANE_BORDER
-                    } else {
-                        colors::DEFAULT_BACKGROUND
-                    }))
+                    pane.border_1()
+                        .border_color(rgb(pane_border_color(theme, id == active)))
                 })
                 .on_mouse_down(
                     MouseButton::Left,
@@ -805,7 +812,7 @@ fn render_node(
             };
             for (index, child) in children.iter().enumerate() {
                 if index > 0 {
-                    let separator = div().flex_none().bg(rgb(BAR_BORDER));
+                    let separator = div().flex_none().bg(rgb(theme.ui.bar_border));
                     container = container.child(match axis {
                         Axis::Horizontal => separator.w(px(1.0)),
                         Axis::Vertical => separator.h(px(1.0)),
@@ -819,7 +826,7 @@ fn render_node(
                         .min_w(px(0.0))
                         .min_h(px(0.0))
                         .overflow_hidden()
-                        .child(render_node(child, highlight, cx)),
+                        .child(render_node(child, highlight, theme, cx)),
                 );
             }
             container.into_any_element()
@@ -834,7 +841,7 @@ impl Render for WorkspaceView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(colors::DEFAULT_BACKGROUND))
+            .bg(rgb(self.config.theme.terminal.background))
             .capture_key_down(cx.listener(Self::on_key_down))
             .child(
                 div()
@@ -879,6 +886,7 @@ fn scrollable_bar(
     height: f32,
     scroll: &ScrollHandle,
     items: Vec<Stateful<gpui::Div>>,
+    theme: &Theme,
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::Div {
     div()
@@ -886,9 +894,9 @@ fn scrollable_bar(
         .flex_none()
         .h(px(height))
         .text_size(px(12.0))
-        .bg(rgb(BAR_BACKGROUND))
+        .bg(rgb(theme.ui.bar_background))
         .border_b_1()
-        .border_color(rgb(BAR_BORDER))
+        .border_color(rgb(theme.ui.bar_border))
         .child(
             div()
                 .id(SharedString::from(format!("{name}-bar")))
@@ -900,13 +908,22 @@ fn scrollable_bar(
                 .track_scroll(scroll)
                 .children(items),
         )
-        .child(scroll_button(name, "left", "<", BAR_ITEM_WIDTH, scroll, cx))
+        .child(scroll_button(
+            name,
+            "left",
+            "<",
+            BAR_ITEM_WIDTH,
+            scroll,
+            theme,
+            cx,
+        ))
         .child(scroll_button(
             name,
             "right",
             ">",
             -BAR_ITEM_WIDTH,
             scroll,
+            theme,
             cx,
         ))
 }
@@ -918,8 +935,10 @@ fn scroll_button(
     label: &'static str,
     delta: f32,
     scroll: &ScrollHandle,
+    theme: &Theme,
     cx: &mut Context<WorkspaceView>,
 ) -> impl IntoElement {
+    let hover_color = rgb(theme.terminal.foreground);
     let scroll = scroll.clone();
     div()
         .id(SharedString::from(format!("{name}-scroll-{side}")))
@@ -930,10 +949,10 @@ fn scroll_button(
         .justify_center()
         .w(px(SCROLL_BUTTON_WIDTH))
         .border_l_1()
-        .border_color(rgb(BAR_BORDER))
-        .text_color(rgb(INACTIVE_TAB_FOREGROUND))
+        .border_color(rgb(theme.ui.bar_border))
+        .text_color(rgb(theme.ui.inactive_foreground))
         .cursor_pointer()
-        .hover(|button| button.text_color(rgb(colors::DEFAULT_FOREGROUND)))
+        .hover(move |button| button.text_color(hover_color))
         .child(label)
         .on_click(cx.listener(move |_, _, _, cx| {
             scroll_by(&scroll, delta);
@@ -951,7 +970,7 @@ fn scroll_by(scroll: &ScrollHandle, delta: f32) {
 
 /// workspace ライン・タブバーの 1 項目。アクティブなものは背景を本文と揃えて強調する。
 /// 上下の段で区切りが揃うよう幅は固定し、収まらないラベルは省略する。
-fn bar_item(active: bool, label: String) -> gpui::Div {
+fn bar_item(active: bool, label: String, theme: &Theme) -> gpui::Div {
     div()
         .flex()
         .flex_none()
@@ -960,23 +979,32 @@ fn bar_item(active: bool, label: String) -> gpui::Div {
         .overflow_hidden()
         .px(px(12.0))
         .border_r_1()
-        .border_color(rgb(BAR_BORDER))
+        .border_color(rgb(theme.ui.bar_border))
         .text_color(rgb(if active {
-            colors::DEFAULT_FOREGROUND
+            theme.terminal.foreground
         } else {
-            INACTIVE_TAB_FOREGROUND
+            theme.ui.inactive_foreground
         }))
-        .when(active, |item| item.bg(rgb(colors::DEFAULT_BACKGROUND)))
+        .when(active, |item| item.bg(rgb(theme.terminal.background)))
         .child(div().min_w(px(0.0)).truncate().child(label))
 }
 
 /// サイドバーで Agent の状態を表す色。
-fn state_color(state: AgentState) -> u32 {
+fn state_color(ui: &UiColors, state: AgentState) -> u32 {
     match state {
-        AgentState::Working => WORKING_COLOR,
-        AgentState::Blocked => BLOCKED_COLOR,
-        AgentState::Done => DONE_COLOR,
-        AgentState::Idle => INACTIVE_TAB_FOREGROUND,
+        AgentState::Working => ui.agent_working,
+        AgentState::Blocked => ui.agent_blocked,
+        AgentState::Done => ui.agent_done,
+        AgentState::Idle => ui.inactive_foreground,
+    }
+}
+
+/// 分割時のペインの枠の色。アクティブなペインだけを目立たせる。
+fn pane_border_color(theme: &Theme, active: bool) -> u32 {
+    if active {
+        theme.ui.active_pane_border
+    } else {
+        theme.terminal.background
     }
 }
 
@@ -1096,6 +1124,49 @@ mod tests {
         assert_eq!(config_error_message(&errors).as_deref(), Some("a (+2)"));
         assert_eq!(config_error_message(&errors[..1]).as_deref(), Some("a"));
         assert_eq!(config_error_message(&[]), None);
+    }
+
+    fn light() -> crate::theme::Theme {
+        crate::theme::builtin("kugutsu-light").unwrap().clone()
+    }
+
+    #[test]
+    fn state_colors_come_from_the_theme() {
+        let ui = light().ui;
+        assert_eq!(state_color(&ui, AgentState::Working), ui.agent_working);
+        assert_eq!(state_color(&ui, AgentState::Blocked), ui.agent_blocked);
+        assert_eq!(state_color(&ui, AgentState::Done), ui.agent_done);
+        assert_eq!(state_color(&ui, AgentState::Idle), ui.inactive_foreground);
+    }
+
+    #[test]
+    fn pane_border_uses_the_theme() {
+        let theme = light();
+        assert_eq!(pane_border_color(&theme, true), theme.ui.active_pane_border);
+        assert_eq!(pane_border_color(&theme, false), theme.terminal.background);
+    }
+
+    #[gpui::test]
+    fn panes_use_the_configured_theme(cx: &mut TestAppContext) {
+        let theme = light();
+        let config = Loaded {
+            config: Config {
+                theme: theme.clone(),
+                ..Config::default()
+            },
+            errors: Vec::new(),
+        };
+        let (workspace, cx) = open_workspace_with_config(cx, sleep_options(), config);
+        // 後から開いたタブのペインもテーマを使う
+        cx.simulate_keystrokes("ctrl-b c");
+        workspace.read_with(cx, |workspace, cx| {
+            let view = workspace
+                .active_tab()
+                .and_then(Tab::active_view)
+                .unwrap()
+                .read(cx);
+            assert_eq!(view.colors(), &theme.terminal);
+        });
     }
 
     /// シェルの代わりに終了しない軽いプログラムを動かすワークスペースを開く。
@@ -1445,16 +1516,18 @@ mod tests {
 
     #[test]
     fn agent_states_have_distinct_colors() {
-        let colors = [
-            AgentState::Working,
-            AgentState::Blocked,
-            AgentState::Done,
-            AgentState::Idle,
-        ]
-        .map(state_color);
-        for (i, a) in colors.iter().enumerate() {
-            for b in &colors[i + 1..] {
-                assert_ne!(a, b);
+        for theme in [crate::theme::Theme::default(), light()] {
+            let colors = [
+                AgentState::Working,
+                AgentState::Blocked,
+                AgentState::Done,
+                AgentState::Idle,
+            ]
+            .map(|state| state_color(&theme.ui, state));
+            for (i, a) in colors.iter().enumerate() {
+                for b in &colors[i + 1..] {
+                    assert_ne!(a, b, "{}", theme.name);
+                }
             }
         }
     }

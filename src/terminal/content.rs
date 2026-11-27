@@ -13,6 +13,7 @@ use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
 
 use super::colors;
+use crate::theme::TerminalColors;
 
 /// セルの描画スタイル（色は 0xRRGGBB）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,11 +26,12 @@ pub struct Style {
     pub strikethrough: bool,
 }
 
-impl Default for Style {
-    fn default() -> Self {
+impl Style {
+    /// 装飾の無い既定の前景色・背景色のスタイル。
+    pub fn plain(colors: &TerminalColors) -> Self {
         Self {
-            fg: colors::DEFAULT_FOREGROUND,
-            bg: colors::DEFAULT_BACKGROUND,
+            fg: colors.foreground,
+            bg: colors.background,
             bold: false,
             italic: false,
             underline: false,
@@ -81,7 +83,7 @@ pub struct Snapshot {
     pub cursor: Option<Cursor>,
 }
 
-pub fn snapshot<T: EventListener>(term: &Term<T>) -> Snapshot {
+pub fn snapshot<T: EventListener>(term: &Term<T>, colors: &TerminalColors) -> Snapshot {
     let content = term.renderable_content();
     let display_offset = content.display_offset as i32;
     let palette = content.colors;
@@ -102,7 +104,7 @@ pub fn snapshot<T: EventListener>(term: &Term<T>) -> Snapshot {
             &mut row.segments,
             indexed.point.column.0,
             cell,
-            style_of(cell, palette),
+            style_of(cell, palette, colors),
         );
     }
 
@@ -188,10 +190,10 @@ fn push_cell(segments: &mut Vec<Segment>, col: usize, cell: &Cell, style: Style)
     }
 }
 
-fn style_of(cell: &Cell, palette: &Colors) -> Style {
+fn style_of(cell: &Cell, palette: &Colors, theme: &TerminalColors) -> Style {
     let flags = cell.flags;
-    let mut fg = colors::to_rgb(cell.fg, palette);
-    let mut bg = colors::to_rgb(cell.bg, palette);
+    let mut fg = colors::to_rgb(cell.fg, palette, theme);
+    let mut bg = colors::to_rgb(cell.bg, palette, theme);
     if flags.contains(Flags::DIM) {
         fg = colors::dim(fg);
     }
@@ -214,13 +216,26 @@ fn style_of(cell: &Cell, palette: &Colors) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::colors::{ANSI_16, DEFAULT_BACKGROUND, DEFAULT_FOREGROUND, dim};
+    use crate::terminal::colors::dim;
     use crate::terminal::size::GridSize;
+    use crate::theme::{self, TerminalColors, Theme};
     use alacritty_terminal::event::VoidListener;
     use alacritty_terminal::term::Config;
     use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 
+    fn dark() -> TerminalColors {
+        Theme::default().terminal
+    }
+
+    fn plain() -> Style {
+        Style::plain(&dark())
+    }
+
     fn snapshot_of(cols: u16, rows: u16, bytes: &[u8]) -> Snapshot {
+        snapshot_with(cols, rows, bytes, &dark())
+    }
+
+    fn snapshot_with(cols: u16, rows: u16, bytes: &[u8], colors: &TerminalColors) -> Snapshot {
         let size = GridSize {
             cols,
             rows,
@@ -230,7 +245,7 @@ mod tests {
         let mut term = Term::new(Config::default(), &size, VoidListener);
         let mut parser: Processor<StdSyncHandler> = Processor::new();
         parser.advance(&mut term, bytes);
-        snapshot(&term)
+        snapshot(&term, colors)
     }
 
     fn seg(col: usize, text: &str, style: Style) -> Segment {
@@ -244,20 +259,14 @@ mod tests {
     }
 
     fn fg(fg: u32) -> Style {
-        Style {
-            fg,
-            ..Style::default()
-        }
+        Style { fg, ..plain() }
     }
 
     #[test]
     fn has_one_row_per_screen_line_padded_with_spaces() {
         let snap = snapshot_of(5, 3, b"hi");
         assert_eq!(snap.rows.len(), 3);
-        assert_eq!(
-            snap.rows[0].segments,
-            vec![seg(0, "hi   ", Style::default())]
-        );
+        assert_eq!(snap.rows[0].segments, vec![seg(0, "hi   ", plain())]);
         assert_eq!(snap.rows[1].text(), "     ");
     }
 
@@ -273,10 +282,7 @@ mod tests {
         let snap = snapshot_of(6, 1, b"\x1b[31mred\x1b[0mok");
         assert_eq!(
             snap.rows[0].segments,
-            vec![
-                seg(0, "red", fg(ANSI_16[1])),
-                seg(3, "ok ", Style::default())
-            ]
+            vec![seg(0, "red", fg(dark().ansi[1])), seg(3, "ok ", plain())]
         );
     }
 
@@ -296,9 +302,9 @@ mod tests {
         assert_eq!(
             snap.rows[0].segments[0].style,
             Style {
-                fg: DEFAULT_BACKGROUND,
-                bg: DEFAULT_FOREGROUND,
-                ..Style::default()
+                fg: dark().background,
+                bg: dark().foreground,
+                ..plain()
             }
         );
     }
@@ -313,7 +319,28 @@ mod tests {
     #[test]
     fn dim_darkens_foreground() {
         let snap = snapshot_of(2, 1, b"\x1b[2mx");
-        assert_eq!(snap.rows[0].segments[0].style.fg, dim(DEFAULT_FOREGROUND));
+        assert_eq!(snap.rows[0].segments[0].style.fg, dim(dark().foreground));
+    }
+
+    #[test]
+    fn default_colors_follow_the_theme() {
+        let light = theme::builtin("kugutsu-light").unwrap().terminal.clone();
+        let snap = snapshot_with(2, 1, b"a\x1b[32mb", &light);
+        assert_eq!(
+            snap.rows[0].segments,
+            vec![
+                seg(0, "a", Style::plain(&light)),
+                seg(
+                    1,
+                    "b",
+                    Style {
+                        fg: 0x00bc00,
+                        ..Style::plain(&light)
+                    }
+                ),
+            ]
+        );
+        assert_eq!(Style::plain(&light).bg, 0xffffff);
     }
 
     #[test]
@@ -328,15 +355,15 @@ mod tests {
         assert_eq!(
             snap.rows[0].segments,
             vec![
-                seg(0, "a", Style::default()),
+                seg(0, "a", plain()),
                 Segment {
                     col: 1,
                     cells: 2,
                     text: "あ".into(),
-                    style: Style::default(),
+                    style: plain(),
                     monospaced: false,
                 },
-                seg(3, "b ", Style::default()),
+                seg(3, "b ", plain()),
             ]
         );
         assert_eq!(snap.rows[0].text(), "aあb ");
@@ -352,10 +379,10 @@ mod tests {
                     col: 0,
                     cells: 1,
                     text: "e\u{301}".into(),
-                    style: Style::default(),
+                    style: plain(),
                     monospaced: false,
                 },
-                seg(1, "x ", Style::default()),
+                seg(1, "x ", plain()),
             ]
         );
     }
@@ -423,7 +450,7 @@ mod tests {
     #[test]
     fn cursor_position_matches_visible_cursor() {
         let term = term_with(5, 1, "あ\x1b[1G".as_bytes());
-        assert_eq!(cursor_position(&term), snapshot(&term).cursor);
+        assert_eq!(cursor_position(&term), snapshot(&term, &dark()).cursor);
     }
 
     /// 3 行の画面に 1〜6 を 1 行ずつ出力し、2 行分スクロールバックをさかのぼったもの。
@@ -435,7 +462,7 @@ mod tests {
 
     #[test]
     fn snapshot_shows_scrollback_while_scrolled() {
-        let snap = snapshot(&scrolled_term());
+        let snap = snapshot(&scrolled_term(), &dark());
         let rows: Vec<String> = snap.rows.iter().map(|r| r.text()).collect();
         assert_eq!(rows, ["2  ", "3  ", "4  "]);
         // カーソルは最下部の画面にあるので見えない

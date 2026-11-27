@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Stop hook: 作業を終える前に CI と同じ clippy を通す。
-# Rust 関係のファイルに変更があるときだけ走らせ、警告やエラーがあれば exit 2 で
-# 出力を Claude に返して修正させる。
+# Stop hook: 作業を終える前に CI と同じ clippy と test を通す。
+# Rust 関係のファイルに変更があるときだけ走らせ、警告やエラー、テストの失敗があれば
+# exit 2 で出力を Claude に返して修正させる。
 set -euo pipefail
 
 input=$(cat)
@@ -21,6 +21,12 @@ fi
 
 if ! out=$(nix develop --command cargo clippy --all-targets --locked --quiet -- -D warnings 2>&1); then
   echo "cargo clippy --all-targets --locked -- -D warnings が失敗しました。修正してください:" >&2
+  tail -n 80 <<<"$out" >&2
+  exit 2
+fi
+
+if ! out=$(nix develop --command cargo test --all-targets --locked --quiet 2>&1); then
+  echo "cargo test --all-targets --locked が失敗しました。修正してください:" >&2
   tail -n 80 <<<"$out" >&2
   exit 2
 fi

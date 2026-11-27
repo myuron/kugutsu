@@ -465,6 +465,33 @@ mod tests {
     }
 
     #[test]
+    fn registered_themes_come_after_user_colors_and_before_plugin_colors() {
+        let env = Env::new("registered-themes");
+        env.write("config/colors/user.lua", &theme_source("#000001"));
+        env.write("data/plugins/p/colors/plugin.lua", &theme_source("#000002"));
+        // プラグインは 1 つのパレットから複数のテーマを登録できる
+        env.write(
+            "data/plugins/p/plugin/p.lua",
+            r##"for _, name in ipairs({ "user", "plugin", "kugutsu-light", "flavor" }) do
+                kugutsu.theme.register({ name = name, terminal = { background = "#000003" } })
+            end"##,
+        );
+        let background = |theme: &str| {
+            let loaded = env.eval(&format!(
+                r#"kugutsu.plugins.setup({{ "o/p" }})
+                kugutsu.opt.theme = "{theme}""#
+            ));
+            assert_eq!(loaded.errors, Vec::<String>::new(), "{theme}");
+            assert_eq!(loaded.config.theme.name, theme);
+            loaded.config.theme.terminal.background
+        };
+        assert_eq!(background("user"), 0x000001);
+        assert_eq!(background("plugin"), 0x000003);
+        assert_eq!(background("kugutsu-light"), 0x000003);
+        assert_eq!(background("flavor"), 0x000003);
+    }
+
+    #[test]
     fn invalid_or_unknown_themes_fall_back_to_the_default() {
         let env = Env::new("bad-theme");
         env.write("config/colors/broken.lua", "return 1");

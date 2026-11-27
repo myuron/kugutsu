@@ -109,6 +109,7 @@ kugutsu.ui.item_width = 150
 | `font_size`   | number | `14`       | Terminal font size in pixels |
 | `line_height` | number | `1.3`      | Line height as a multiple of the font size |
 | `theme`       | string | `"kugutsu-dark"` | Color theme (see [Themes](#themes)) |
+| `theme_overrides` | table | none | Colors that override the selected theme (see [Themes](#themes)) |
 | `background_opacity` | number | `1.0` | Opacity of the background, from `0.0` (fully transparent) to `1.0` (opaque) |
 | `background_blur` | boolean | `false` | Blur what is behind a translucent window |
 | `ui_font_family` | string | first installed font of a built-in list of proportional fonts (Inter, Noto Sans, …) | Font of the bars, sidebar and status line. The terminal keeps `font_family` |
@@ -128,6 +129,7 @@ The following are errors:
 - A `prefix` that is not a valid keystroke, or an empty `font_family` or `ui_font_family`
 - A `font_size`, `line_height` or `item_width` that is zero, negative, NaN or infinite
 - A `theme` that is not found (see [Themes](#themes)) or a theme file that is invalid
+- Invalid `theme_overrides`, or an invalid theme passed to `kugutsu.theme.register`
 - A `background_opacity` or `inactive_pane_opacity` outside `0.0`–`1.0`, or NaN
 - Invalid key mappings (see [Key mappings](#key-mappings))
 - An invalid plugin spec, and errors while loading a plugin (see [Plugins](#plugins))
@@ -202,11 +204,12 @@ A theme sets the colors of the terminal and of the Kugutsu UI. Kugutsu bundles t
 - `kugutsu-dark` (default)
 - `kugutsu-light`
 
-Select one with `kugutsu.opt.theme`. The theme is looked up after `init.lua` and the plugins have been loaded, so the order of `kugutsu.opt.theme` and `kugutsu.plugins.setup` does not matter. The first match wins:
+Select one with `kugutsu.opt.theme`. The theme is looked up after `init.lua` and the plugins have been loaded, so the order of `kugutsu.opt.theme`, `kugutsu.plugins.setup` and `kugutsu.theme.register` does not matter. The first match wins:
 
 1. `~/.config/kugutsu/colors/<name>.lua` (your own themes, next to `init.lua`)
-2. `colors/<name>.lua` of each loaded [plugin](#plugins), in the order of the spec
-3. The bundled themes
+2. Themes registered with [`kugutsu.theme.register`](#registering-themes-from-lua) (the last registration of a name wins)
+3. `colors/<name>.lua` of each loaded [plugin](#plugins), in the order of the spec
+4. The bundled themes
 
 An unknown theme name is reported as an error and the default theme is used.
 
@@ -242,7 +245,7 @@ return {
 }
 ```
 
-The keys in `terminal` and the first group of `ui` keys are required. The optional `ui` keys fall back to colors derived from the required ones, so themes written before they existed keep working:
+Every key is optional. The keys in `terminal` and the first group of `ui` keys that a theme leaves out come from `kugutsu-dark`. The second group of `ui` keys falls back to colors derived from the first group (after that fill-in), so themes written before they existed keep working:
 
 | Key | Fallback |
 | --- | --- |
@@ -252,7 +255,57 @@ The keys in `terminal` and the first group of `ui` keys are required. The option
 | `overlay_background` | `bar_background` mixed with 10% of `foreground` |
 | `strong_border` | `bar_border` |
 
+Unknown keys, colors that are not `"#rrggbb"` and an `ansi` list without exactly 16 colors are errors. The theme's name is the file name; a `name` key is allowed but ignored.
+
 The bundled themes keep colors for the agent states and use grays for everything else, so the agents that need attention stand out.
+
+#### Overriding colors
+
+`kugutsu.opt.theme_overrides` sets single colors on top of the selected theme. It takes the same `terminal` and `ui` tables as a theme file (without `name`), and every key is optional:
+
+```lua
+kugutsu.opt.theme = "kugutsu-light"
+kugutsu.opt.theme_overrides = {
+  ui = { active_pane_border = "#ff8800" },
+}
+```
+
+Only the given colors change: overriding `bar_background` does not recompute the derived colors such as `raised_background`, so set those too if needed. The overrides also apply when the theme is not found, on top of the default theme.
+
+#### Registering themes from Lua
+
+`kugutsu.theme.register(theme)` registers a theme table with a required `name`. A plugin can use it to build several flavors from one palette, e.g. in its `plugin/*.lua`:
+
+```lua
+local palettes = {
+  ["mytheme-night"] = { bg = "#1a1b26", fg = "#c0caf5" },
+  ["mytheme-day"] = { bg = "#e1e2e7", fg = "#3760bf" },
+}
+for name, p in pairs(palettes) do
+  kugutsu.theme.register({
+    name = name,
+    terminal = { background = p.bg, foreground = p.fg },
+    ui = { bar_background = p.bg },
+  })
+end
+```
+
+### Writing a theme plugin
+
+A theme plugin is a [plugin](#plugins) with a `colors/` directory. Each `colors/<name>.lua` is a theme named `<name>`, and a plugin may ship several:
+
+```
+mytheme.kugutsu/
+  colors/mytheme-night.lua
+  colors/mytheme-day.lua
+```
+
+Install it like any plugin and select one of its themes:
+
+```lua
+kugutsu.plugins.setup({ "you/mytheme.kugutsu" })
+kugutsu.opt.theme = "mytheme-night"
+```
 
 ### Background transparency
 

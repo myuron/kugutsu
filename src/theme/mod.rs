@@ -31,7 +31,9 @@ static BUILTIN: LazyLock<Vec<Theme>> = LazyLock::new(|| {
     BUNDLED
         .iter()
         .map(|(name, source)| {
-            parse(source, name).unwrap_or_else(|err| panic!("bundled theme is invalid: {err}"))
+            read_patch(source, name)
+                .and_then(|patch| complete(&patch, name))
+                .unwrap_or_else(|err| panic!("bundled theme is invalid: {err}"))
         })
         .collect()
 });
@@ -133,98 +135,251 @@ pub fn find(name: &str, dirs: &[PathBuf]) -> Result<Theme, String> {
 }
 
 /// テーマファイルを評価してテーマを読み込む。`name` はテーマ名で、エラーメッセージにも使う。
+/// テーマに無い色は既定のテーマの色にする（派生の色はそれから導出する）。
 pub fn parse(source: &str, name: &str) -> Result<Theme, String> {
+    Ok(build(&read_patch(source, name)?, name))
+}
+
+/// テーマファイルを評価して、そこに書かれた色を読む。
+fn read_patch(source: &str, name: &str) -> Result<ThemePatch, String> {
     let lua = Lua::new();
     let value: Value = lua
         .load(source)
         .set_name(format!("={name}.lua"))
         .eval()
         .map_err(|err| config::error_message(&err))?;
-    read_theme(&value)
-        .map(|(terminal, ui)| Theme {
-            name: name.to_string(),
-            terminal,
-            ui,
-        })
-        .map_err(|err| format!("{name}: {err}"))
+    patch(&value).map_err(|err| format!("{name}: {err}"))
+}
+
+/// テーマの一部の色。書かれていない色は `None`。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThemePatch {
+    pub terminal: TerminalPatch,
+    pub ui: UiPatch,
+}
+
+/// [`TerminalColors`] の一部。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TerminalPatch {
+    pub foreground: Option<u32>,
+    pub background: Option<u32>,
+    pub cursor: Option<u32>,
+    pub ansi: Option<[u32; 16]>,
+}
+
+/// [`UiColors`] の各色について、[`UiPatch`] とその読み書きを作る。
+macro_rules! ui_patch {
+    ($($key:ident),* $(,)?) => {
+        /// [`UiColors`] の一部。
+        #[derive(Debug, Clone, Default, PartialEq)]
+        pub struct UiPatch {
+            $(pub $key: Option<u32>,)*
+        }
+
+        const UI_KEYS: &[&str] = &[$(stringify!($key)),*];
+
+        impl UiPatch {
+            fn read(table: &Table) -> Result<Self, String> {
+                Ok(Self {
+                    $($key: optional_color(table, "ui.", stringify!($key))?,)*
+                })
+            }
+
+            fn apply_to(&self, ui: &mut UiColors) {
+                $(if let Some(color) = self.$key {
+                    ui.$key = color;
+                })*
+            }
+
+            /// `over` にある色で上書きした patch。
+            fn merge(&self, over: &Self) -> Self {
+                Self {
+                    $($key: over.$key.or(self.$key),)*
+                }
+            }
+
+            fn complete(&self) -> Result<UiColors, String> {
+                Ok(UiColors {
+                    $($key: self
+                        .$key
+                        .ok_or_else(|| format!("ui.{}: missing", stringify!($key)))?,)*
+                })
+            }
+        }
+    };
+}
+
+ui_patch!(
+    bar_background,
+    bar_border,
+    inactive_foreground,
+    active_pane_border,
+    prefix_indicator,
+    agent_working,
+    agent_blocked,
+    agent_done,
+    error,
+    foreground,
+    accent,
+    raised_background,
+    overlay_background,
+    strong_border,
+);
+
+impl UiPatch {
+    /// 省略した派生の色（`foreground` など）を、ほかの色から導出して埋める。
+    fn derive(&mut self, terminal_foreground: Option<u32>) {
+        self.foreground = self.foreground.or(terminal_foreground);
+        self.accent = self.accent.or(self.active_pane_border);
+        self.strong_border = self.strong_border.or(self.bar_border);
+        if let (Some(background), Some(foreground)) = (self.bar_background, self.foreground) {
+            self.raised_background = self
+                .raised_background
+                .or(Some(mix(background, foreground, RAISED_MIX)));
+            self.overlay_background =
+                self.overlay_background
+                    .or(Some(mix(background, foreground, OVERLAY_MIX)));
+        }
+    }
+
+    /// 派生の色を消した patch（ほかのテーマの土台にするとき、派生の色は導出し直す）。
+    fn without_derived(&self) -> Self {
+        Self {
+            foreground: None,
+            accent: None,
+            raised_background: None,
+            overlay_background: None,
+            strong_border: None,
+            ..self.clone()
+        }
+    }
+}
+
+impl TerminalPatch {
+    fn merge(&self, over: &Self) -> Self {
+        Self {
+            foreground: over.foreground.or(self.foreground),
+            background: over.background.or(self.background),
+            cursor: over.cursor.or(self.cursor),
+            ansi: over.ansi.or(self.ansi),
+        }
+    }
 }
 
 const TERMINAL_KEYS: [&str; 4] = ["foreground", "background", "cursor", "ansi"];
-const UI_KEYS: [&str; 9] = [
-    "bar_background",
-    "bar_border",
-    "inactive_foreground",
-    "active_pane_border",
-    "prefix_indicator",
-    "agent_working",
-    "agent_blocked",
-    "agent_done",
-    "error",
-];
-/// 省略できる UI の色。
-const OPTIONAL_UI_KEYS: [&str; 5] = [
-    "foreground",
-    "accent",
-    "raised_background",
-    "overlay_background",
-    "strong_border",
-];
 
-fn read_theme(value: &Value) -> Result<(TerminalColors, UiColors), String> {
-    let root = table(value).map_err(|reason| reason.to_string())?;
-    check_keys(&root, "", &["terminal", "ui"])?;
+/// 既定のテーマの色（派生の色を除く）。部分的なテーマの土台にする。
+static DEFAULT_PATCH: LazyLock<ThemePatch> = LazyLock::new(|| {
+    let source = BUNDLED
+        .iter()
+        .find(|(name, _)| *name == DEFAULT_THEME)
+        .expect("default theme is bundled")
+        .1;
+    let patch = read_patch(source, DEFAULT_THEME)
+        .unwrap_or_else(|err| panic!("bundled theme is invalid: {err}"));
+    ThemePatch {
+        terminal: patch.terminal,
+        ui: patch.ui.without_derived(),
+    }
+});
 
-    let terminal = table(&field(&root, "", "terminal")?).map_err(|r| format!("terminal: {r}"))?;
-    check_keys(&terminal, "terminal.", &TERMINAL_KEYS)?;
-    let color_of = |table: &Table, path: &str, key: &str| {
-        color(&field(table, path, key)?, &format!("{path}{key}"))
+/// テーマに書かれた色 `patch` からテーマを作る。無い色は既定のテーマの色にし、
+/// 派生の色はそれから導出する。
+fn build(patch: &ThemePatch, name: &str) -> Theme {
+    let merged = ThemePatch {
+        terminal: DEFAULT_PATCH.terminal.merge(&patch.terminal),
+        ui: DEFAULT_PATCH.ui.merge(&patch.ui),
     };
-    let terminal_colors = TerminalColors {
-        foreground: color_of(&terminal, "terminal.", "foreground")?,
-        background: color_of(&terminal, "terminal.", "background")?,
-        cursor: color_of(&terminal, "terminal.", "cursor")?,
-        ansi: ansi(&field(&terminal, "terminal.", "ansi")?)?,
+    complete(&merged, name).expect("the default theme defines every required color")
+}
+
+impl Theme {
+    /// `patch` にある色だけを上書きする。
+    pub fn apply(&mut self, patch: &ThemePatch) {
+        let terminal = &patch.terminal;
+        let target = &mut self.terminal;
+        for (slot, color) in [
+            (&mut target.foreground, terminal.foreground),
+            (&mut target.background, terminal.background),
+            (&mut target.cursor, terminal.cursor),
+        ] {
+            if let Some(color) = color {
+                *slot = color;
+            }
+        }
+        if let Some(ansi) = terminal.ansi {
+            target.ansi = ansi;
+        }
+        patch.ui.apply_to(&mut self.ui);
+    }
+}
+
+/// 必須の色が揃った `patch` をテーマにする。派生の色は省略されていれば導出する。
+fn complete(patch: &ThemePatch, name: &str) -> Result<Theme, String> {
+    let missing = |key: &str| format!("{name}: terminal.{key}: missing");
+    let terminal = &patch.terminal;
+    let mut ui = patch.ui.clone();
+    ui.derive(terminal.foreground);
+    Ok(Theme {
+        name: name.to_string(),
+        terminal: TerminalColors {
+            foreground: terminal.foreground.ok_or_else(|| missing("foreground"))?,
+            background: terminal.background.ok_or_else(|| missing("background"))?,
+            cursor: terminal.cursor.ok_or_else(|| missing("cursor"))?,
+            ansi: terminal.ansi.ok_or_else(|| missing("ansi"))?,
+        },
+        ui: ui.complete().map_err(|err| format!("{name}: {err}"))?,
+    })
+}
+
+/// テーマの table（`{ name = ..., terminal = { ... }, ui = { ... } }`）から色を読む。
+/// どのキーも省略できる。`name` は文字列であることだけを確かめる。
+pub fn patch(value: &Value) -> Result<ThemePatch, String> {
+    let root = table(value)?;
+    check_keys(&root, "", &["name", "terminal", "ui"])?;
+    match optional(&root, "", "name")? {
+        None | Some(Value::String(_)) => {}
+        Some(other) => {
+            return Err(format!(
+                "name: expected string, got {}",
+                config::lua_type_name(&other)
+            ));
+        }
+    }
+
+    let terminal = match optional(&root, "", "terminal")? {
+        None => TerminalPatch::default(),
+        Some(value) => {
+            let terminal = table(&value).map_err(|r| format!("terminal: {r}"))?;
+            check_keys(&terminal, "terminal.", &TERMINAL_KEYS)?;
+            let color_of = |key| optional_color(&terminal, "terminal.", key);
+            TerminalPatch {
+                foreground: color_of("foreground")?,
+                background: color_of("background")?,
+                cursor: color_of("cursor")?,
+                ansi: optional(&terminal, "terminal.", "ansi")?
+                    .map(|value| ansi(&value))
+                    .transpose()?,
+            }
+        }
     };
 
-    let ui = table(&field(&root, "", "ui")?).map_err(|r| format!("ui: {r}"))?;
-    let allowed: Vec<&str> = UI_KEYS.iter().chain(&OPTIONAL_UI_KEYS).copied().collect();
-    check_keys(&ui, "ui.", &allowed)?;
-    let ui_color = |key: &str| color_of(&ui, "ui.", key);
-    // 省略されていれば `fallback` を使う
-    let optional = |key: &str, fallback: u32| match ui.raw_get::<Value>(key) {
-        Ok(Value::Nil) => Ok(fallback),
-        Ok(value) => color(&value, &format!("ui.{key}")),
-        Err(err) => Err(format!("ui.{key}: {err}")),
+    let ui = match optional(&root, "", "ui")? {
+        None => UiPatch::default(),
+        Some(value) => {
+            let ui = table(&value).map_err(|r| format!("ui: {r}"))?;
+            check_keys(&ui, "ui.", UI_KEYS)?;
+            UiPatch::read(&ui)?
+        }
     };
-    let bar_background = ui_color("bar_background")?;
-    let bar_border = ui_color("bar_border")?;
-    let active_pane_border = ui_color("active_pane_border")?;
-    let foreground = optional("foreground", terminal_colors.foreground)?;
-    let raised_background = optional(
-        "raised_background",
-        mix(bar_background, foreground, RAISED_MIX),
-    )?;
-    let overlay_background = optional(
-        "overlay_background",
-        mix(bar_background, foreground, OVERLAY_MIX),
-    )?;
-    let ui_colors = UiColors {
-        foreground,
-        accent: optional("accent", active_pane_border)?,
-        raised_background,
-        overlay_background,
-        strong_border: optional("strong_border", bar_border)?,
-        bar_background,
-        bar_border,
-        inactive_foreground: ui_color("inactive_foreground")?,
-        active_pane_border,
-        prefix_indicator: ui_color("prefix_indicator")?,
-        agent_working: ui_color("agent_working")?,
-        agent_blocked: ui_color("agent_blocked")?,
-        agent_done: ui_color("agent_done")?,
-        error: ui_color("error")?,
-    };
-    Ok((terminal_colors, ui_colors))
+    Ok(ThemePatch { terminal, ui })
+}
+
+/// `table[key]` の色。無ければ `None`。
+fn optional_color(table: &Table, path: &str, key: &str) -> Result<Option<u32>, String> {
+    optional(table, path, key)?
+        .map(|value| color(&value, &format!("{path}{key}")))
+        .transpose()
 }
 
 fn table(value: &Value) -> Result<Table, String> {
@@ -237,11 +392,11 @@ fn table(value: &Value) -> Result<Table, String> {
     }
 }
 
-/// `table[key]`。無ければエラー。`path` はエラーに出すキーの接頭辞（`"ui."` など）。
-fn field(table: &Table, path: &str, key: &str) -> Result<Value, String> {
+/// `table[key]`。無ければ `None`。`path` はエラーに出すキーの接頭辞（`"ui."` など）。
+fn optional(table: &Table, path: &str, key: &str) -> Result<Option<Value>, String> {
     match table.raw_get::<Value>(key) {
-        Ok(Value::Nil) => Err(format!("{path}{key}: missing")),
-        Ok(value) => Ok(value),
+        Ok(Value::Nil) => Ok(None),
+        Ok(value) => Ok(Some(value)),
         Err(err) => Err(format!("{path}{key}: {err}")),
     }
 }
@@ -456,12 +611,86 @@ mod tests {
     }
 
     #[test]
-    fn missing_keys_are_errors() {
-        parse_err(
-            &dark_with("theme.ui.agent_done = nil"),
-            "ui.agent_done: missing",
+    fn missing_keys_fall_back_to_the_default_theme() {
+        let light = BUNDLED[1].1.replacen("return {", "local theme = {", 1);
+        let source =
+            format!("{light}\ntheme.ui.agent_done = nil\ntheme.terminal = nil\nreturn theme");
+        let theme = parse(&source, "partial").unwrap();
+        let light = builtin("kugutsu-light").unwrap();
+        let dark = Theme::default();
+        assert_eq!(theme.name, "partial");
+        assert_eq!(theme.terminal, dark.terminal);
+        assert_eq!(theme.ui.agent_done, dark.ui.agent_done);
+        assert_eq!(theme.ui.bar_background, light.ui.bar_background);
+
+        let theme = parse("return {}", "empty").unwrap();
+        assert_eq!(theme.name, "empty");
+        assert_eq!(theme.terminal, dark.terminal);
+        assert_eq!(theme.ui.bar_background, dark.ui.bar_background);
+    }
+
+    #[test]
+    fn partial_themes_derive_the_optional_colors_from_their_own_colors() {
+        // 既定のテーマの派生の色ではなく、補った後の色から導出する
+        let theme = parse(
+            r##"return { ui = { bar_background = "#000000", bar_border = "#111111" } }"##,
+            "partial",
+        )
+        .unwrap();
+        let dark = Theme::default();
+        assert_eq!(theme.ui.strong_border, 0x111111);
+        assert_eq!(theme.ui.foreground, dark.terminal.foreground);
+        assert_eq!(theme.ui.accent, dark.ui.active_pane_border);
+        assert_eq!(
+            theme.ui.raised_background,
+            mix(0x000000, dark.terminal.foreground, RAISED_MIX)
         );
-        parse_err(&dark_with("theme.terminal = nil"), "terminal: missing");
+        assert_eq!(
+            theme.ui.overlay_background,
+            mix(0x000000, dark.terminal.foreground, OVERLAY_MIX)
+        );
+    }
+
+    #[test]
+    fn a_theme_may_name_itself() {
+        let theme = parse(r#"return { name = "other" }"#, "file").unwrap();
+        // ファイルのテーマ名はファイル名で決まる
+        assert_eq!(theme.name, "file");
+        parse_err(
+            "return { name = 1 }",
+            "test: name: expected string, got number",
+        );
+    }
+
+    #[test]
+    fn apply_overrides_only_the_given_colors() {
+        let lua = Lua::new();
+        let value: Value = lua
+            .load(r##"return { terminal = { cursor = "#010203" }, ui = { error = "#040506" } }"##)
+            .eval()
+            .unwrap();
+        let patch = patch(&value).unwrap();
+        let mut theme = builtin("kugutsu-light").unwrap().clone();
+        let before = theme.clone();
+        theme.apply(&patch);
+        assert_eq!(theme.terminal.cursor, 0x010203);
+        assert_eq!(theme.ui.error, 0x040506);
+        assert_eq!(theme.terminal.background, before.terminal.background);
+        assert_eq!(theme.ui.bar_background, before.ui.bar_background);
+        assert_eq!(theme.name, "kugutsu-light");
+    }
+
+    #[test]
+    fn bundled_themes_define_every_key() {
+        let lua = Lua::new();
+        for (name, source) in BUNDLED {
+            let value: Value = lua.load(source).eval().unwrap();
+            complete(&patch(&value).unwrap(), name).unwrap_or_else(|err| panic!("{err}"));
+        }
+        assert_eq!(
+            complete(&ThemePatch::default(), "p").unwrap_err(),
+            "p: terminal.foreground: missing"
+        );
     }
 
     #[test]

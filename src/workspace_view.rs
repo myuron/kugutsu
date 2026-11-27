@@ -1108,6 +1108,20 @@ mod tests {
     }
 
     #[gpui::test]
+    fn unknown_theme_is_reported_and_falls_back_to_default(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(cx, "kugutsu.opt.theme = 'nope'");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("config-error").is_some());
+        workspace.read_with(cx, |workspace, _| {
+            assert_eq!(
+                workspace.config_error_message().as_deref(),
+                Some("init.lua:1: kugutsu.opt.theme: unknown theme 'nope'")
+            );
+            assert_eq!(workspace.config.theme, crate::theme::Theme::default());
+        });
+    }
+
+    #[gpui::test]
     fn no_config_error_without_errors(cx: &mut TestAppContext) {
         let (workspace, cx) = open_workspace(cx);
         cx.run_until_parked();

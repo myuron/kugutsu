@@ -7,6 +7,7 @@ use gpui::Keystroke;
 use mlua::{Lua, Value};
 
 use super::{Config, Loaded};
+use crate::theme;
 
 /// `kugutsu` グローバルを組み立てる Lua コード。`set` / `get` は Rust の関数で、
 /// 不正な値ならエラーメッセージを返す。`error(..., 2)` で代入した行をエラー位置にする。
@@ -76,6 +77,12 @@ fn set_option(config: &mut Config, key: &str, value: &Value) -> Result<(), Strin
         }
         "font_size" => config.font_size = positive_number(key, value)?,
         "line_height" => config.line_height = positive_number(key, value)?,
+        "theme" => {
+            let name = string(key, value)?;
+            config.theme = theme::builtin(&name)
+                .ok_or_else(|| invalid(&format!("unknown theme '{name}'")))?
+                .clone();
+        }
         _ => return Err(unknown(key)),
     }
     Ok(())
@@ -93,6 +100,7 @@ fn get_option(lua: &Lua, config: &Config, key: &str) -> Result<Value, String> {
         "font_family" => config.font_family.as_deref().map_or(Ok(Value::Nil), string),
         "font_size" => Ok(Value::Number(config.font_size.into())),
         "line_height" => Ok(Value::Number(config.line_height.into())),
+        "theme" => string(&config.theme.name),
         _ => Err(unknown(key)),
     }
 }
@@ -162,6 +170,7 @@ pub(crate) fn error_message(err: &mlua::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::Theme;
     use gpui::Keystroke;
 
     fn eval(source: &str) -> Loaded {
@@ -265,6 +274,33 @@ mod tests {
         eval_err(
             "kugutsu.opt.line_height = math.huge",
             "kugutsu.opt.line_height",
+        );
+    }
+
+    #[test]
+    fn selects_a_bundled_theme() {
+        let config = eval_ok(r#"kugutsu.opt.theme = "kugutsu-light""#);
+        assert_eq!(
+            &config.theme,
+            crate::theme::builtin("kugutsu-light").unwrap()
+        );
+        eval_ok(r#"assert(kugutsu.opt.theme == "kugutsu-dark")"#);
+        eval_ok(
+            r#"kugutsu.opt.theme = "kugutsu-light"
+            assert(kugutsu.opt.theme == "kugutsu-light")"#,
+        );
+    }
+
+    #[test]
+    fn unknown_theme_is_an_error() {
+        let config = eval_err(
+            r#"kugutsu.opt.theme = "nope""#,
+            "kugutsu.opt.theme: unknown theme 'nope'",
+        );
+        assert_eq!(config.theme, Theme::default());
+        eval_err(
+            "kugutsu.opt.theme = 1",
+            "kugutsu.opt.theme: expected string, got number",
         );
     }
 

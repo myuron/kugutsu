@@ -14,7 +14,7 @@ use crate::agents::AgentState;
 use crate::config::{Config, Loaded};
 use crate::panes::{Axis, Node, PaneId, Panes};
 use crate::tabs::Tabs;
-use crate::tabs::prefix::{Command, KeyOutcome, PrefixKeymap, bindings};
+use crate::tabs::prefix::{Action, Command, KeyOutcome, PrefixKeymap};
 use crate::terminal::size::GridSize;
 use crate::terminal::{SpawnOptions, Terminal};
 use crate::terminal_view::{TerminalView, TerminalViewEvent};
@@ -116,7 +116,7 @@ impl WorkspaceView {
         let first = Self::create_pane(terminal, events, &config, window, cx);
         let this = Self {
             workspaces: Tabs::new(Workspace::new(first)),
-            keymap: PrefixKeymap::new(config.prefix.clone()),
+            keymap: PrefixKeymap::new(config.prefix.clone(), config.keymap.clone()),
             config,
             config_errors,
             spawn_options,
@@ -268,13 +268,31 @@ impl WorkspaceView {
         match self.keymap.handle(&event.keystroke) {
             KeyOutcome::Forward => {}
             KeyOutcome::Consumed => cx.stop_propagation(),
-            KeyOutcome::Command(command) => {
+            KeyOutcome::Action(action) => {
                 cx.stop_propagation();
-                self.run(command, window, cx);
+                self.perform(action, window, cx);
             }
         }
         if was_armed != self.keymap.is_armed() {
             cx.notify();
+        }
+    }
+
+    /// キーに割り当てた動作を実行する。Lua 関数のエラーはステータスラインに出す。
+    fn perform(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        let commands = match action {
+            Action::Command(command) => vec![command],
+            Action::Lua(callback) => match callback.call() {
+                Ok(commands) => commands,
+                Err(err) => {
+                    self.config_errors.push(err);
+                    cx.notify();
+                    return;
+                }
+            },
+        };
+        for command in commands {
+            self.run(command, window, cx);
         }
     }
 
@@ -673,28 +691,35 @@ impl WorkspaceView {
     /// （vim の which-key 風）。ターミナルを縮めてリサイズさせないよう、レイアウトには
     /// 参加させずに重ねる。
     fn render_which_key(&self) -> impl IntoElement {
-        let items = bindings().into_iter().map(|(key, description)| {
-            div()
-                .flex()
-                .flex_none()
-                .gap(px(8.0))
-                .w(px(WHICH_KEY_ITEM_WIDTH))
-                .overflow_hidden()
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(WHICH_KEY_KEY_WIDTH))
-                        .text_color(rgb(self.config.theme.ui.prefix_indicator))
-                        .child(key),
-                )
-                .child(
-                    div()
-                        .min_w(px(0.0))
-                        .truncate()
-                        .text_color(rgb(self.config.theme.terminal.foreground))
-                        .child(description),
-                )
-        });
+        let items = self
+            .keymap
+            .keymap()
+            .entries()
+            .into_iter()
+            .map(|(key, description)| {
+                let selector = format!("which-key:{key}:{description}");
+                div()
+                    .debug_selector(move || selector)
+                    .flex()
+                    .flex_none()
+                    .gap(px(8.0))
+                    .w(px(WHICH_KEY_ITEM_WIDTH))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(WHICH_KEY_KEY_WIDTH))
+                            .text_color(rgb(self.config.theme.ui.prefix_indicator))
+                            .child(key),
+                    )
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .truncate()
+                            .text_color(rgb(self.config.theme.terminal.foreground))
+                            .child(description),
+                    )
+            });
         div()
             .debug_selector(|| "which-key".into())
             .absolute()
@@ -716,23 +741,33 @@ impl WorkspaceView {
     /// ウィンドウ全体に重ねるキーマップ一覧。背景をクリックすると閉じる。
     fn render_keymap_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let prefix = self.prefix_label();
-        let rows = bindings().into_iter().map(|(key, description)| {
-            div()
-                .flex()
-                .gap(px(16.0))
-                .child(
-                    div()
-                        .w(px(KEYMAP_KEY_COLUMN_WIDTH))
-                        .flex_none()
-                        .text_color(rgb(self.config.theme.ui.prefix_indicator))
-                        .child(format!("{prefix} {key}")),
-                )
-                .child(
-                    div()
-                        .text_color(rgb(self.config.theme.terminal.foreground))
-                        .child(description),
-                )
-        });
+        let keymap = self.keymap.keymap();
+        // prefix 付きの割り当ての後に、prefix を使わない割り当てを並べる
+        let prefixed = keymap
+            .entries()
+            .into_iter()
+            .map(|(key, description)| (format!("{prefix} {key}"), description));
+        let rows = prefixed
+            .chain(keymap.direct_entries())
+            .map(|(key, description)| {
+                let selector = format!("keymap-help:{key}:{description}");
+                div()
+                    .debug_selector(move || selector)
+                    .flex()
+                    .gap(px(16.0))
+                    .child(
+                        div()
+                            .w(px(KEYMAP_KEY_COLUMN_WIDTH))
+                            .flex_none()
+                            .text_color(rgb(self.config.theme.ui.prefix_indicator))
+                            .child(key),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(self.config.theme.terminal.foreground))
+                            .child(description),
+                    )
+            });
         let panel = div()
             .id("keymap-help")
             .debug_selector(|| "keymap-help".into())
@@ -1512,6 +1547,120 @@ mod tests {
         cx.simulate_keystrokes("ctrl-b z");
         cx.run_until_parked();
         assert!(cx.debug_bounds("which-key").is_none());
+    }
+
+    fn active_pane_count(workspace: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> usize {
+        workspace.read_with(cx, |w, _| {
+            w.active_tabs()
+                .unwrap()
+                .active()
+                .unwrap()
+                .panes
+                .iter()
+                .count()
+        })
+    }
+
+    #[gpui::test]
+    fn mapped_key_after_prefix_runs_its_action(cx: &mut TestAppContext) {
+        let (workspace, cx) =
+            open_workspace_with_init_lua(cx, r#"kugutsu.keymap.set("<prefix>t", "new_tab")"#);
+        cx.simulate_keystrokes("ctrl-b t");
+        assert_eq!(active_tab_count(&workspace, cx), 2);
+    }
+
+    #[gpui::test]
+    fn mappings_follow_the_configured_prefix(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(
+            cx,
+            r#"kugutsu.keymap.set("<prefix>t", "new_tab")
+            kugutsu.opt.prefix = "ctrl-a""#,
+        );
+        cx.simulate_keystrokes("ctrl-b t");
+        assert_eq!(active_tab_count(&workspace, cx), 1);
+        cx.simulate_keystrokes("ctrl-a t");
+        assert_eq!(active_tab_count(&workspace, cx), 2);
+    }
+
+    #[gpui::test]
+    fn direct_mapping_runs_without_the_prefix(cx: &mut TestAppContext) {
+        let (workspace, cx) =
+            open_workspace_with_init_lua(cx, r#"kugutsu.keymap.set("ctrl-shift-t", "new_tab")"#);
+        cx.simulate_keystrokes("ctrl-shift-t");
+        assert_eq!(active_tab_count(&workspace, cx), 2);
+    }
+
+    #[gpui::test]
+    fn deleted_mapping_does_nothing(cx: &mut TestAppContext) {
+        let (workspace, cx) =
+            open_workspace_with_init_lua(cx, r#"kugutsu.keymap.del("<prefix>c")"#);
+        cx.simulate_keystrokes("ctrl-b c");
+        assert_eq!(active_tab_count(&workspace, cx), 1);
+    }
+
+    #[gpui::test]
+    fn lua_mapping_runs_the_actions_it_calls(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(
+            cx,
+            r#"kugutsu.keymap.set("<prefix>w", function()
+                kugutsu.action.new_tab()
+                kugutsu.action.split_horizontal()
+            end)"#,
+        );
+        cx.simulate_keystrokes("ctrl-b w");
+        assert_eq!(active_tab_count(&workspace, cx), 2);
+        assert_eq!(active_pane_count(&workspace, cx), 2);
+    }
+
+    #[gpui::test]
+    fn lua_mapping_errors_are_shown_in_status_line(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(
+            cx,
+            r#"kugutsu.keymap.set("<prefix>w", function() error("boom") end)"#,
+        );
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("config-error").is_none());
+        cx.simulate_keystrokes("ctrl-b w");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("config-error").is_some());
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.config_error_message()),
+            Some("init.lua:1: boom".to_string())
+        );
+    }
+
+    #[gpui::test]
+    fn which_key_shows_mapping_descriptions(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace_with_init_lua(
+            cx,
+            r#"kugutsu.keymap.set("<prefix>t", "new_tab", { desc = "Open a tab" })
+            kugutsu.keymap.set("ctrl-shift-t", "new_tab", { desc = "Tab right away" })"#,
+        );
+        cx.simulate_keystrokes("ctrl-b");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("which-key:t:Open a tab").is_some());
+        assert!(cx.debug_bounds("which-key:1-9:Select tab N").is_some());
+        // prefix を使わない割り当ては which-key に出さない
+        assert!(
+            cx.debug_bounds("which-key:ctrl-shift-t:Tab right away")
+                .is_none()
+        );
+    }
+
+    #[gpui::test]
+    fn keymap_help_lists_prefixed_and_direct_mappings(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace_with_init_lua(
+            cx,
+            r#"kugutsu.keymap.set("<prefix>t", "new_tab", { desc = "Open a tab" })
+            kugutsu.keymap.set("ctrl-shift-t", "new_tab", { desc = "Tab right away" })"#,
+        );
+        cx.simulate_keystrokes("ctrl-b ?");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("keymap-help:ctrl-b t:Open a tab").is_some());
+        assert!(
+            cx.debug_bounds("keymap-help:ctrl-shift-t:Tab right away")
+                .is_some()
+        );
     }
 
     #[gpui::test]

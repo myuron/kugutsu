@@ -1,46 +1,116 @@
-//! `init.lua` の評価。`kugutsu.opt` への代入を検証して [`Config`] に書き込む。
+//! `init.lua` の評価。`kugutsu.opt` への代入と `kugutsu.keymap` によるキーの割り当てを
+//! 検証して [`Config`] に書き込む。
 
 use std::cell::RefCell;
+use std::fmt;
 use std::rc::Rc;
 
 use gpui::Keystroke;
-use mlua::{Lua, Value};
+use mlua::{Function, Lua, Table, Value};
 
 use super::{Config, Loaded};
+use crate::tabs::prefix::{Action, Command, PREFIX_PLACEHOLDER, Trigger};
 use crate::theme;
 
-/// `kugutsu` グローバルを組み立てる Lua コード。`set` / `get` は Rust の関数で、
-/// 不正な値ならエラーメッセージを返す。`error(..., 2)` で代入した行をエラー位置にする。
+/// `kugutsu` グローバルを組み立てる Lua コード。`set` / `get` などは Rust の関数で、
+/// 不正な値ならエラーメッセージを返す。`error(..., 2)` で呼び出した行をエラー位置にする。
 const PRELUDE: &str = r#"
-local set, get = ...
+local set, get, keymap_set, keymap_del, action, action_names = ...
+local function check(err)
+    if err then error(err, 3) end
+end
 local opt = setmetatable({}, {
     __newindex = function(_, key, value)
-        local err = set(key, value)
-        if err then error(err, 2) end
+        check(set(key, value))
     end,
     __index = function(_, key)
         local value, err = get(key)
-        if err then error(err, 2) end
+        check(err)
         return value
     end,
 })
-kugutsu = { opt = opt }
+local keymap = {
+    set = function(key, rhs, opts)
+        check(keymap_set(key, rhs, opts))
+    end,
+    del = function(key)
+        check(keymap_del(key))
+    end,
+}
+local actions = {}
+for _, name in ipairs(action_names) do
+    actions[name] = function()
+        check(action(name))
+    end
+end
+actions.select_tab = function(number)
+    check(action("select_tab", number))
+end
+kugutsu = { opt = opt, keymap = keymap, action = actions }
 "#;
+
+/// `kugutsu.action.*` が積む操作の行き先。`None` のときはキーマップの実行中ではない。
+type ActionQueue = Rc<RefCell<Option<Vec<Command>>>>;
+
+/// キーに割り当てた Lua 関数。
+///
+/// mlua の値は Lua 本体を弱参照でしか持たないので、`init.lua` の評価後も呼べるよう
+/// `Lua` を一緒に持って生かしておく。
+#[derive(Clone)]
+pub struct LuaCallback {
+    _lua: Lua,
+    function: Function,
+    queue: ActionQueue,
+}
+
+impl LuaCallback {
+    /// 関数を呼び、その中で `kugutsu.action.*` が呼ばれた操作を順に返す。
+    pub fn call(&self) -> Result<Vec<Command>, String> {
+        let previous = self.queue.replace(Some(Vec::new()));
+        let result = self.function.call::<()>(());
+        let commands = std::mem::replace(&mut *self.queue.borrow_mut(), previous);
+        result.map_err(|err| error_message(&err))?;
+        Ok(commands.unwrap_or_default())
+    }
+}
+
+impl fmt::Debug for LuaCallback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LuaCallback")
+    }
+}
+
+impl PartialEq for LuaCallback {
+    fn eq(&self, other: &Self) -> bool {
+        // 同じキューなら同じ Lua の関数なので比べられる（別の Lua の値を比べると panic する）
+        Rc::ptr_eq(&self.queue, &other.queue) && self.function == other.function
+    }
+}
 
 /// Lua のソースを評価して設定を読み込む。`chunk_name` はエラーメッセージに出す名前。
 /// エラーが起きてもそこまでに設定された値は残す。
 pub fn evaluate(source: &str, chunk_name: &str) -> Loaded {
     let config = Rc::new(RefCell::new(Config::default()));
-    let errors = match run(source, chunk_name, &config) {
+    let mut errors = match run(source, chunk_name, &config) {
         Ok(()) => Vec::new(),
         Err(err) => vec![error_message(&err)],
     };
-    let config = config.borrow().clone();
+    // Lua に登録した関数は `config` を持ち続ける。割り当てた Lua 関数は Lua 本体を持つので、
+    // 中身を取り出して Lua → `config` → Lua の循環参照を作らない
+    let mut config = std::mem::take(&mut *config.borrow_mut());
+    // prefix は後から変えられるので、prefix と同じキーへの直接の割り当ては最後に確かめる
+    if config.keymap.del(&Trigger::Direct(config.prefix.clone())) {
+        errors.push(format!(
+            "kugutsu.keymap: '{}' is the prefix key and cannot be mapped without {PREFIX_PLACEHOLDER}",
+            config.prefix.unparse()
+        ));
+    }
     Loaded { config, errors }
 }
 
 fn run(source: &str, chunk_name: &str, config: &Rc<RefCell<Config>>) -> mlua::Result<()> {
     let lua = Lua::new();
+    let queue: ActionQueue = Rc::default();
     let target = Rc::clone(config);
     let set = lua.create_function(move |_, (key, value): (String, Value)| {
         Ok(set_option(&mut target.borrow_mut(), &key, &value).err())
@@ -52,11 +122,140 @@ fn run(source: &str, chunk_name: &str, config: &Rc<RefCell<Config>>) -> mlua::Re
             Err(err) => (Value::Nil, Some(err)),
         })
     })?;
-    lua.load(PRELUDE)
-        .set_name("=prelude")
-        .call::<()>((set, get))?;
+    let target = Rc::clone(config);
+    let callback_queue = Rc::clone(&queue);
+    let keymap_set = lua.create_function(move |lua, (key, rhs, opts): (Value, Value, Value)| {
+        let mapping = parse_mapping(lua, &callback_queue, &key, rhs, &opts);
+        Ok(mapping
+            .map(|(trigger, action, desc)| target.borrow_mut().keymap.set(trigger, action, desc))
+            .err())
+    })?;
+    let target = Rc::clone(config);
+    let keymap_del = lua.create_function(move |_, key: Value| {
+        Ok(delete_mapping(&mut target.borrow_mut(), &key).err())
+    })?;
+    let action = lua.create_function(move |_, (name, arg): (String, Value)| {
+        Ok(push_action(&queue, &name, &arg).err())
+    })?;
+    let action_names = Command::NAMED.iter().map(|&(name, _)| name);
+    let action_names = lua.create_sequence_from(action_names)?;
+    lua.load(PRELUDE).set_name("=prelude").call::<()>((
+        set,
+        get,
+        keymap_set,
+        keymap_del,
+        action,
+        action_names,
+    ))?;
     // `=` で始まる名前はそのままエラー位置に出る（`init.lua:3: ...`）
     lua.load(source).set_name(format!("={chunk_name}")).exec()
+}
+
+/// `kugutsu.keymap.set(key, rhs, opts)` の引数を検証する。
+fn parse_mapping(
+    lua: &Lua,
+    queue: &ActionQueue,
+    key: &Value,
+    rhs: Value,
+    opts: &Value,
+) -> Result<(Trigger, Action, Option<String>), String> {
+    let error = |reason: String| format!("kugutsu.keymap.set: {reason}");
+    let trigger = parse_trigger(key).map_err(error)?;
+    let action = match rhs {
+        Value::String(name) => {
+            let name = name.to_string_lossy();
+            Command::from_name(&name)
+                .map(Action::Command)
+                .ok_or_else(|| error(format!("unknown action '{name}'")))?
+        }
+        Value::Function(function) => Action::Lua(LuaCallback {
+            _lua: lua.clone(),
+            function,
+            queue: Rc::clone(queue),
+        }),
+        other => {
+            return Err(error(format!(
+                "action: expected string or function, got {}",
+                lua_type_name(&other)
+            )));
+        }
+    };
+    let desc = match opts {
+        Value::Nil => None,
+        Value::Table(table) => description(table).map_err(error)?,
+        other => {
+            return Err(error(format!(
+                "opts: expected table, got {}",
+                lua_type_name(other)
+            )));
+        }
+    };
+    Ok((trigger, action, desc))
+}
+
+/// `opts.desc`。
+fn description(opts: &Table) -> Result<Option<String>, String> {
+    match opts.get::<Value>("desc").map_err(|err| err.to_string())? {
+        Value::Nil => Ok(None),
+        Value::String(text) => Ok(Some(text.to_string_lossy())),
+        other => Err(format!(
+            "desc: expected string, got {}",
+            lua_type_name(&other)
+        )),
+    }
+}
+
+/// `kugutsu.keymap.del(key)`。
+fn delete_mapping(config: &mut Config, key: &Value) -> Result<(), String> {
+    let error = |reason: String| format!("kugutsu.keymap.del: {reason}");
+    let trigger = parse_trigger(key).map_err(error)?;
+    if config.keymap.del(&trigger) {
+        Ok(())
+    } else {
+        Err(error(format!("no mapping for '{trigger}'")))
+    }
+}
+
+/// `<prefix>t` や `ctrl-shift-t` のようなキーの表記。
+fn parse_trigger(key: &Value) -> Result<Trigger, String> {
+    match key {
+        Value::String(text) => Trigger::parse(&text.to_string_lossy()),
+        other => Err(format!(
+            "key: expected string, got {}",
+            lua_type_name(other)
+        )),
+    }
+}
+
+/// `kugutsu.action.<name>(arg)` の操作をキューに積む。
+fn push_action(queue: &ActionQueue, name: &str, arg: &Value) -> Result<(), String> {
+    let error = |reason: &str| format!("kugutsu.action.{name}: {reason}");
+    let command = match name {
+        "select_tab" => Command::SelectTab(tab_number(arg).map_err(|reason| error(&reason))? - 1),
+        _ => Command::from_name(name).ok_or_else(|| error("unknown action"))?,
+    };
+    match queue.borrow_mut().as_mut() {
+        Some(commands) => {
+            commands.push(command);
+            Ok(())
+        }
+        None => Err(error("can only be called from a key mapping")),
+    }
+}
+
+/// `select_tab` に渡すタブの番号（1〜9）。
+fn tab_number(arg: &Value) -> Result<usize, String> {
+    let expected = "expected an integer between 1 and 9";
+    let number = match *arg {
+        Value::Integer(n) => n as f64,
+        Value::Number(n) => n,
+        ref other => return Err(format!("{expected}, got {}", lua_type_name(other))),
+    };
+    if number.fract() == 0.0 && (1.0..=9.0).contains(&number) {
+        Ok(number as usize)
+    } else {
+        Err(format!("{expected}, got {number}"))
+    }
 }
 
 /// `kugutsu.opt.<key> = value` を検証して設定に書き込む。
@@ -197,6 +396,7 @@ pub(crate) fn error_message(err: &mlua::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tabs::prefix::{Action, Binding, Keymap, Trigger};
     use crate::theme::Theme;
     use gpui::Keystroke;
 
@@ -400,6 +600,205 @@ mod tests {
     fn syntax_errors_are_reported() {
         let config = eval_err("kugutsu.opt.font_size = 20\nthis is not lua", "init.lua:2:");
         assert_eq!(config, Config::default());
+    }
+
+    fn trigger(text: &str) -> Trigger {
+        Trigger::parse(text).unwrap()
+    }
+
+    fn binding<'a>(config: &'a Config, key: &str) -> Option<&'a Binding> {
+        config.keymap.lookup(&trigger(key))
+    }
+
+    fn lua_callback(config: &Config, key: &str) -> LuaCallback {
+        match &binding(config, key).expect(key).action {
+            Action::Lua(callback) => callback.clone(),
+            other => panic!("{key} is not a Lua function: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_keymap_is_used_without_mappings() {
+        assert_eq!(eval_ok("").keymap, Keymap::default());
+    }
+
+    #[test]
+    fn maps_a_key_to_a_named_action_with_a_description() {
+        let config =
+            eval_ok(r#"kugutsu.keymap.set("<prefix>t", "new_tab", { desc = "Open a tab" })"#);
+        let binding = binding(&config, "<prefix>t").unwrap();
+        assert_eq!(binding.action, Action::Command(Command::NewTab));
+        assert_eq!(binding.desc, "Open a tab");
+    }
+
+    #[test]
+    fn description_defaults_to_the_action_description() {
+        let config = eval_ok(
+            r#"kugutsu.keymap.set("<prefix>|", "split_horizontal")
+            kugutsu.keymap.set("ctrl-shift-t", "new_tab", {})"#,
+        );
+        assert_eq!(
+            binding(&config, "<prefix>|").unwrap().desc,
+            "Split pane left / right"
+        );
+        assert_eq!(binding(&config, "ctrl-shift-t").unwrap().desc, "New tab");
+        let config = eval_ok(r#"kugutsu.keymap.set("<prefix>w", function() end)"#);
+        assert_eq!(binding(&config, "<prefix>w").unwrap().desc, "Lua function");
+    }
+
+    #[test]
+    fn del_removes_a_mapping() {
+        let config = eval_ok(r#"kugutsu.keymap.del("<prefix>x")"#);
+        assert_eq!(binding(&config, "<prefix>x"), None);
+        assert!(binding(&config, "<prefix>c").is_some());
+    }
+
+    #[test]
+    fn invalid_mappings_are_errors() {
+        let cases = [
+            (
+                r#"kugutsu.keymap.set(1, "new_tab")"#,
+                "kugutsu.keymap.set: key: expected string, got number",
+            ),
+            (
+                r#"kugutsu.keymap.set("<prefix>", "new_tab")"#,
+                r#"kugutsu.keymap.set: invalid key "<prefix>""#,
+            ),
+            (
+                r#"kugutsu.keymap.set("ctrl-", "new_tab")"#,
+                r#"kugutsu.keymap.set: invalid key "ctrl-""#,
+            ),
+            (
+                r#"kugutsu.keymap.set("<prefix>t", "nope")"#,
+                "kugutsu.keymap.set: unknown action 'nope'",
+            ),
+            (
+                r#"kugutsu.keymap.set("<prefix>t", 1)"#,
+                "kugutsu.keymap.set: action: expected string or function, got number",
+            ),
+            (
+                r#"kugutsu.keymap.set("<prefix>t", "new_tab", "x")"#,
+                "kugutsu.keymap.set: opts: expected table, got string",
+            ),
+            (
+                r#"kugutsu.keymap.set("<prefix>t", "new_tab", { desc = 1 })"#,
+                "kugutsu.keymap.set: desc: expected string, got number",
+            ),
+            (
+                r#"kugutsu.keymap.del("<prefix>z")"#,
+                "kugutsu.keymap.del: no mapping for '<prefix>z'",
+            ),
+            (
+                r#"kugutsu.keymap.del(true)"#,
+                "kugutsu.keymap.del: key: expected string, got boolean",
+            ),
+        ];
+        for (source, expected) in cases {
+            let config = eval_err(source, &format!("init.lua:1: {expected}"));
+            assert_eq!(config.keymap, Keymap::default(), "{source}");
+        }
+    }
+
+    #[test]
+    fn direct_mapping_of_the_prefix_is_an_error() {
+        let config = eval_err(
+            r#"kugutsu.keymap.set("ctrl-a", "new_tab")
+            kugutsu.opt.prefix = "ctrl-a""#,
+            "kugutsu.keymap: 'ctrl-a' is the prefix key and cannot be mapped without <prefix>",
+        );
+        assert_eq!(binding(&config, "ctrl-a"), None);
+        assert_eq!(config.prefix, Keystroke::parse("ctrl-a").unwrap());
+    }
+
+    #[test]
+    fn lua_function_returns_the_actions_it_calls() {
+        let config = eval_ok(
+            r#"kugutsu.keymap.set("<prefix>w", function()
+                kugutsu.action.new_tab()
+                kugutsu.action.split_horizontal()
+                kugutsu.action.select_tab(3)
+            end, { desc = "Tab with two panes" })"#,
+        );
+        assert_eq!(
+            binding(&config, "<prefix>w").unwrap().desc,
+            "Tab with two panes"
+        );
+        let callback = lua_callback(&config, "<prefix>w");
+        let expected = vec![
+            Command::NewTab,
+            Command::Split(crate::panes::Axis::Horizontal),
+            Command::SelectTab(2),
+        ];
+        assert_eq!(callback.call(), Ok(expected.clone()));
+        // 何度呼んでも同じ
+        assert_eq!(callback.call(), Ok(expected));
+    }
+
+    #[test]
+    fn every_named_action_is_callable_from_lua() {
+        for &(name, command) in Command::NAMED {
+            let config = eval_ok(&format!(
+                r#"kugutsu.keymap.set("<prefix>w", function() kugutsu.action.{name}() end)"#
+            ));
+            assert_eq!(
+                lua_callback(&config, "<prefix>w").call(),
+                Ok(vec![command]),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn lua_function_keeps_its_upvalues() {
+        let config = eval_ok(
+            r#"local count = 0
+            kugutsu.keymap.set("<prefix>w", function()
+                count = count + 1
+                for _ = 1, count do kugutsu.action.next_tab() end
+            end)"#,
+        );
+        let callback = lua_callback(&config, "<prefix>w");
+        assert_eq!(callback.call(), Ok(vec![Command::NextTab]));
+        assert_eq!(
+            callback.call(),
+            Ok(vec![Command::NextTab, Command::NextTab])
+        );
+    }
+
+    #[test]
+    fn actions_outside_a_mapping_are_errors() {
+        eval_err(
+            "kugutsu.action.new_tab()",
+            "init.lua:1: kugutsu.action.new_tab: can only be called from a key mapping",
+        );
+    }
+
+    #[test]
+    fn errors_in_a_lua_function_are_returned() {
+        let config = eval_ok(
+            r#"kugutsu.keymap.set("<prefix>w", function()
+                kugutsu.action.new_tab()
+                error("boom")
+            end)"#,
+        );
+        let callback = lua_callback(&config, "<prefix>w");
+        let err = callback.call().unwrap_err();
+        assert!(err.contains("init.lua:3: boom"), "{err}");
+        assert!(!err.contains("traceback"), "{err}");
+
+        for (arg, shown) in [("0", "0"), ("10", "10"), ("1.5", "1.5"), ("'x'", "string")] {
+            let config = eval_ok(&format!(
+                r#"kugutsu.keymap.set("<prefix>w", function() kugutsu.action.select_tab({arg}) end)"#
+            ));
+            let err = lua_callback(&config, "<prefix>w").call().unwrap_err();
+            assert!(
+                err.contains(
+                    "init.lua:1: kugutsu.action.select_tab: expected an integer between 1 and 9"
+                ),
+                "{arg}: {err}"
+            );
+            assert!(err.contains(shown), "{arg}: {err}");
+        }
     }
 
     #[test]

@@ -113,11 +113,14 @@ The following are errors:
 - Values of the wrong type (e.g. `kugutsu.opt.font_size = "big"`)
 - A `prefix` that is not a valid keystroke, or an empty `font_family`
 - A `font_size` or `line_height` that is zero, negative, NaN or infinite
-- A `theme` that is not a bundled theme
+- A `theme` that is not found (see [Themes](#themes)) or a theme file that is invalid
 - A `background_opacity` outside `0.0`–`1.0`, or NaN
 - Invalid key mappings (see [Key mappings](#key-mappings))
+- An invalid plugin spec, and errors while loading a plugin (see [Plugins](#plugins))
 
 Errors are shown on the right of the status line with the line number in `init.lua`, and Kugutsu keeps running. Options set before the error still apply; the rest keep their defaults.
+
+`~/.config/kugutsu/lua/` (the `lua/` directory next to `init.lua`) is on the module path, so a large configuration can be split into modules and loaded with `require`.
 
 ### Key mappings
 
@@ -185,7 +188,13 @@ A theme sets the colors of the terminal and of the Kugutsu UI. Kugutsu bundles t
 - `kugutsu-dark` (default)
 - `kugutsu-light`
 
-Select one with `kugutsu.opt.theme`. An unknown theme name is reported as an error and the default theme is used.
+Select one with `kugutsu.opt.theme`. The theme is looked up after `init.lua` and the plugins have been loaded, so the order of `kugutsu.opt.theme` and `kugutsu.plugins.setup` does not matter. The first match wins:
+
+1. `~/.config/kugutsu/colors/<name>.lua` (your own themes, next to `init.lua`)
+2. `colors/<name>.lua` of each loaded [plugin](#plugins), in the order of the spec
+3. The bundled themes
+
+An unknown theme name is reported as an error and the default theme is used.
 
 A theme is a Lua file `colors/<name>.lua` that returns a table of colors written as `"#rrggbb"`. The bundled themes are in [`runtime/colors/`](runtime/colors/):
 
@@ -212,10 +221,137 @@ return {
 }
 ```
 
-Every key is required. Loading your own themes and themes from plugins is not supported yet.
+Every key is required.
 
 ### Background transparency
 
 `background_opacity` below `1.0` makes the window background translucent: the default background of the terminal and the UI bars become see-through. Cells with a background color set by the application and text stay opaque. With `background_blur = true`, Kugutsu also asks the compositor to blur what is behind the window.
 
 Whether transparency and blur work depends on the platform and the compositor (e.g. a Wayland compositor that supports it). Where they are not supported, the window stays opaque.
+
+## Plugins
+
+Kugutsu has a built-in plugin manager. Plugins are declared in `init.lua`, pinned in a lockfile, and cloned into the XDG data directory, so `~/.config/kugutsu/` only holds your own configuration and can be kept in your dotfiles.
+
+Like Nix flakes, **only explicit commands change plugins or the lockfile**. Starting Kugutsu only loads what is on disk: it never touches the network and never writes the lockfile or the plugins directory.
+
+### Declaring plugins
+
+```lua
+kugutsu.plugins.setup({
+  "catppuccin/catppuccin.kugutsu",                       -- GitHub shorthand
+  { "folke/tokyonight.kugutsu", rev = "v1.0.0" },        -- tag, branch or commit
+  { url = "https://git.example.com/me/foo.kugutsu.git" },
+  { "bob/theme.kugutsu", name = "bob-theme.kugutsu" },   -- custom name
+  { dir = "~/src/my-plugin.kugutsu" },                   -- local plugin for development, not managed
+})
+```
+
+- `owner/repo` expands to `https://github.com/owner/repo.git`.
+- The name of a plugin is the last part of its URL or directory without `.git` (e.g. `catppuccin.kugutsu`), or `name` if given. It is used for the directory under `plugins/`, the lockfile and `kugutsu update NAME`. Two plugins with the same name are an error.
+- `rev` is a tag, a branch or a full commit. Without it, the default branch is used.
+- `dir` plugins are always loaded from that directory and are not locked or installed. A relative `dir` is relative to the directory of `init.lua`.
+- Unknown keys are an error, to catch typos such as `opt =`.
+- If `kugutsu.plugins.setup` is called more than once, the last call wins.
+
+Per-plugin configuration lives in the spec:
+
+```lua
+kugutsu.plugins.setup({
+  { "bob/notes.kugutsu", opts = { width = 80 } },              -- require("notes").setup(opts)
+  { "carol/notify.kugutsu", config = function(opts) ... end },  -- custom setup
+  { "dave/foo-kugutsu", main = "foo", opts = {} },              -- module name differs from the plugin name
+})
+```
+
+| Key      | Meaning |
+| -------- | ------- |
+| `opts`   | Table passed to `require(main).setup(opts)` |
+| `config` | `function(opts)` called instead of `setup`; receives `opts` |
+| `main`   | Module whose `setup` is called. Defaults to the plugin name without the `.kugutsu` suffix (`notes.kugutsu` -> `notes`) |
+
+The spec is plain Lua, so it can be split into modules. Nested lists are flattened:
+
+```lua
+-- init.lua
+kugutsu.plugins.setup({
+  require("plugins.ui"),
+  require("plugins.agents"),
+  "catppuccin/catppuccin.kugutsu",
+})
+
+-- ~/.config/kugutsu/lua/plugins/agents.lua
+return {
+  { "alice/aider.kugutsu", opts = { width = 80 } },
+}
+```
+
+### Where things live
+
+| Path | Content | In dotfiles? |
+| ---- | ------- | ------------ |
+| `$XDG_CONFIG_HOME/kugutsu/init.lua` | Plugin spec and options | yes |
+| `$XDG_CONFIG_HOME/kugutsu/kugutsu.lock` | Pinned commit of each plugin | yes |
+| `$XDG_DATA_HOME/kugutsu/plugins/<name>/` | Cloned plugins | no |
+
+Without the XDG variables, `~/.config` and `~/.local/share` are used. The lockfile always lives next to `init.lua` (also with `$KUGUTSU_CONFIG`).
+
+### Commands
+
+```
+kugutsu                      start Kugutsu
+kugutsu lock                 spec -> lockfile
+kugutsu update [NAME...]     spec -> lockfile, moving plugins to their latest commits
+kugutsu install              lockfile -> plugins directory
+```
+
+| Command | Writes | Nix analogy |
+| ------- | ------ | ----------- |
+| `lock` | Lockfile only: resolves plugins that are new or whose `url` / `rev` changed, removes plugins no longer in the spec, keeps the rest | `nix flake lock` |
+| `update [NAME...]` | Lockfile only: resolves the given plugins (all if none) to the latest commit of their `rev` or default branch | `nix flake update` |
+| `install` | Plugins directory only: clones or checks out the locked commits, and removes plugins that are no longer locked | `nix build` |
+
+- `lock` and `update` only ask the remote for commits (`git ls-remote`); applying them always takes `kugutsu install`.
+- Each command prints one line per plugin. A failing plugin does not stop the others, and the command exits with code 1.
+- `lock` and `update` write the lockfile only if every plugin resolved.
+- `git` must be installed. The Nix package brings its own `git`, used when no other `git` is on `PATH`.
+
+A typical lifecycle:
+
+1. Add a plugin to the spec. The status line shows `plugins: 1 missing — run kugutsu install`.
+2. Run `kugutsu lock` and `kugutsu install`, then restart Kugutsu.
+3. Commit `init.lua` and `kugutsu.lock` to your dotfiles. On another machine, `kugutsu install` checks out the same commits.
+4. `kugutsu update` and `kugutsu install` move plugins to their latest commits. To roll back, revert the lockfile and run `kugutsu install`.
+5. Remove a plugin from the spec. It is no longer loaded; `kugutsu lock` and `kugutsu install` remove it from the lockfile and from disk.
+
+The lockfile is TOML, sorted by name:
+
+```toml
+version = 1
+
+[plugins."catppuccin.kugutsu"]
+url = "https://github.com/catppuccin/catppuccin.kugutsu.git"
+rev = "v1.0.0"
+commit = "def4567890abcdef1234567890abcdef12345678"
+```
+
+### Loading
+
+A plugin is loaded on startup if it is in the spec and its directory exists; the lockfile is not read. Plugins are loaded in the order of the spec:
+
+```
+notes.kugutsu/
+  plugin/*.lua    -- run when the plugin is loaded
+  lua/notes/...   -- modules, require("notes")
+  colors/*.lua    -- themes
+```
+
+1. `lua/` is added to the module path and `colors/` to the [theme](#themes) lookup.
+2. `plugin/*.lua` are run in file name order.
+3. `config(opts)` is called if given; otherwise, if `opts` is given, `require(main).setup(opts)` is called. `opts` without a `setup` function is an error.
+
+Errors are shown in the status line with the plugin name (e.g. `notes.kugutsu: plugin/notes.lua:12: ...`). The rest of that plugin is skipped; other plugins are not affected.
+
+### External plugins (Nix)
+
+A symlink or a directory without `.git` under `$XDG_DATA_HOME/kugutsu/plugins/` is **external**: `kugutsu install` never clones, checks out or removes it, and Kugutsu loads it like any other plugin when its name is in the spec. This way plugins can be provided from the Nix store, and the same `init.lua` works on machines with and without Nix.

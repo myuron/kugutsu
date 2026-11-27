@@ -4,7 +4,7 @@
 use alacritty_terminal::event::Event;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    AnyElement, Context, Entity, Focusable, KeyDownEvent, MouseButton, Render, ScrollHandle,
+    AnyElement, Context, Entity, Focusable, KeyDownEvent, MouseButton, Render, Rgba, ScrollHandle,
     SharedString, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb, rgba,
 };
 
@@ -470,27 +470,22 @@ impl WorkspaceView {
     /// タブバーの上に置く workspace の一覧。クリックでその workspace へ切り替える。
     fn render_workspace_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active_index = self.workspaces.active_index();
-        let items =
-            (0..self.workspaces.iter().count())
-                .map(|index| {
-                    bar_item(
-                        index == active_index,
-                        workspace_label(index),
-                        &self.config.theme,
-                    )
+        let items = (0..self.workspaces.iter().count())
+            .map(|index| {
+                bar_item(index == active_index, workspace_label(index), &self.config)
                     .id(("workspace", index))
                     .debug_selector(|| format!("workspace-{index}"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.select_workspace(index, window, cx)
                     }))
-                })
-                .collect();
+            })
+            .collect();
         scrollable_bar(
             "workspace",
             WORKSPACE_BAR_HEIGHT,
             &self.workspace_scroll,
             items,
-            &self.config.theme,
+            &self.config,
             cx,
         )
     }
@@ -502,16 +497,12 @@ impl WorkspaceView {
             for (index, tab) in tabs.iter().enumerate() {
                 let title = tab.active_view().and_then(|view| view.read(cx).title());
                 items.push(
-                    bar_item(
-                        index == active_index,
-                        tab_label(index, title),
-                        &self.config.theme,
-                    )
-                    .id(("tab", index))
-                    .debug_selector(|| format!("tab-{index}"))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.run(Command::SelectTab(index), window, cx)
-                    })),
+                    bar_item(index == active_index, tab_label(index, title), &self.config)
+                        .id(("tab", index))
+                        .debug_selector(|| format!("tab-{index}"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.run(Command::SelectTab(index), window, cx)
+                        })),
                 );
             }
         }
@@ -520,7 +511,7 @@ impl WorkspaceView {
             TAB_BAR_HEIGHT,
             &self.tab_scroll,
             items,
-            &self.config.theme,
+            &self.config,
             cx,
         )
     }
@@ -531,7 +522,7 @@ impl WorkspaceView {
         let root = panes.root()?;
         // ペインが 1 つだけなら枠で強調する必要は無い
         let highlight = matches!(root, Node::Split { .. }).then_some(panes.active_id());
-        Some(render_node(root, highlight, &self.config.theme, cx))
+        Some(render_node(root, highlight, &self.config, cx))
     }
 
     /// 全 workspace・全タブ・全ペインで動いている Agent の一覧。クリックでそのペインへ移る。
@@ -571,7 +562,9 @@ impl WorkspaceView {
                     .py(px(6.0))
                     .cursor_pointer()
                     .when(active, |row| {
-                        row.bg(rgb(self.config.theme.terminal.background))
+                        row.bg(self
+                            .config
+                            .translucent(self.config.theme.terminal.background))
                     })
                     .child(
                         div()
@@ -608,7 +601,7 @@ impl WorkspaceView {
             .h_full()
             .overflow_hidden()
             .text_size(px(12.0))
-            .bg(rgb(self.config.theme.ui.bar_background))
+            .bg(self.config.translucent(self.config.theme.ui.bar_background))
             .border_r_1()
             .border_color(rgb(self.config.theme.ui.bar_border))
             .child(
@@ -645,7 +638,7 @@ impl WorkspaceView {
             .h(px(STATUS_LINE_HEIGHT))
             .px(px(12.0))
             .text_size(px(12.0))
-            .bg(rgb(self.config.theme.ui.bar_background))
+            .bg(self.config.translucent(self.config.theme.ui.bar_background))
             .border_t_1()
             .border_color(rgb(self.config.theme.ui.bar_border))
             .when(self.keymap.is_armed(), |line| {
@@ -785,7 +778,7 @@ impl WorkspaceView {
 fn render_node(
     node: &Node<Pane>,
     highlight: Option<PaneId>,
-    theme: &Theme,
+    config: &Config,
     cx: &mut Context<WorkspaceView>,
 ) -> AnyElement {
     match node {
@@ -795,7 +788,7 @@ fn render_node(
                 .size_full()
                 .when_some(highlight, |pane, active| {
                     pane.border_1()
-                        .border_color(rgb(pane_border_color(theme, id == active)))
+                        .border_color(pane_border_color(&config.theme, id == active))
                 })
                 .on_mouse_down(
                     MouseButton::Left,
@@ -812,7 +805,7 @@ fn render_node(
             };
             for (index, child) in children.iter().enumerate() {
                 if index > 0 {
-                    let separator = div().flex_none().bg(rgb(theme.ui.bar_border));
+                    let separator = div().flex_none().bg(rgb(config.theme.ui.bar_border));
                     container = container.child(match axis {
                         Axis::Horizontal => separator.w(px(1.0)),
                         Axis::Vertical => separator.h(px(1.0)),
@@ -826,7 +819,7 @@ fn render_node(
                         .min_w(px(0.0))
                         .min_h(px(0.0))
                         .overflow_hidden()
-                        .child(render_node(child, highlight, theme, cx)),
+                        .child(render_node(child, highlight, config, cx)),
                 );
             }
             container.into_any_element()
@@ -841,7 +834,6 @@ impl Render for WorkspaceView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(self.config.theme.terminal.background))
             .capture_key_down(cx.listener(Self::on_key_down))
             .child(
                 div()
@@ -862,6 +854,9 @@ impl Render for WorkspaceView {
                             .child(
                                 div()
                                     .debug_selector(|| "panes".into())
+                                    .bg(self
+                                        .config
+                                        .translucent(self.config.theme.terminal.background))
                                     .flex_1()
                                     .min_h(px(0.0))
                                     .overflow_hidden()
@@ -886,7 +881,7 @@ fn scrollable_bar(
     height: f32,
     scroll: &ScrollHandle,
     items: Vec<Stateful<gpui::Div>>,
-    theme: &Theme,
+    config: &Config,
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::Div {
     div()
@@ -894,9 +889,9 @@ fn scrollable_bar(
         .flex_none()
         .h(px(height))
         .text_size(px(12.0))
-        .bg(rgb(theme.ui.bar_background))
+        .bg(config.translucent(config.theme.ui.bar_background))
         .border_b_1()
-        .border_color(rgb(theme.ui.bar_border))
+        .border_color(rgb(config.theme.ui.bar_border))
         .child(
             div()
                 .id(SharedString::from(format!("{name}-bar")))
@@ -914,7 +909,7 @@ fn scrollable_bar(
             "<",
             BAR_ITEM_WIDTH,
             scroll,
-            theme,
+            &config.theme,
             cx,
         ))
         .child(scroll_button(
@@ -923,7 +918,7 @@ fn scrollable_bar(
             ">",
             -BAR_ITEM_WIDTH,
             scroll,
-            theme,
+            &config.theme,
             cx,
         ))
 }
@@ -970,7 +965,8 @@ fn scroll_by(scroll: &ScrollHandle, delta: f32) {
 
 /// workspace ライン・タブバーの 1 項目。アクティブなものは背景を本文と揃えて強調する。
 /// 上下の段で区切りが揃うよう幅は固定し、収まらないラベルは省略する。
-fn bar_item(active: bool, label: String, theme: &Theme) -> gpui::Div {
+fn bar_item(active: bool, label: String, config: &Config) -> gpui::Div {
+    let theme = &config.theme;
     div()
         .flex()
         .flex_none()
@@ -985,7 +981,9 @@ fn bar_item(active: bool, label: String, theme: &Theme) -> gpui::Div {
         } else {
             theme.ui.inactive_foreground
         }))
-        .when(active, |item| item.bg(rgb(theme.terminal.background)))
+        .when(active, |item| {
+            item.bg(config.translucent(theme.terminal.background))
+        })
         .child(div().min_w(px(0.0)).truncate().child(label))
 }
 
@@ -999,12 +997,12 @@ fn state_color(ui: &UiColors, state: AgentState) -> u32 {
     }
 }
 
-/// 分割時のペインの枠の色。アクティブなペインだけを目立たせる。
-fn pane_border_color(theme: &Theme, active: bool) -> u32 {
+/// 分割時のペインの枠の色。アクティブなペインだけを目立たせ、ほかは透明にする。
+fn pane_border_color(theme: &Theme, active: bool) -> Rgba {
     if active {
-        theme.ui.active_pane_border
+        rgb(theme.ui.active_pane_border)
     } else {
-        theme.terminal.background
+        Rgba::default()
     }
 }
 
@@ -1156,8 +1154,12 @@ mod tests {
     #[test]
     fn pane_border_uses_the_theme() {
         let theme = light();
-        assert_eq!(pane_border_color(&theme, true), theme.ui.active_pane_border);
-        assert_eq!(pane_border_color(&theme, false), theme.terminal.background);
+        assert_eq!(
+            pane_border_color(&theme, true),
+            rgb(theme.ui.active_pane_border)
+        );
+        // 非アクティブな枠は透明にして、下のペイン領域の背景を見せる
+        assert_eq!(pane_border_color(&theme, false).a, 0.0);
     }
 
     #[gpui::test]

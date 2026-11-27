@@ -77,6 +77,8 @@ fn set_option(config: &mut Config, key: &str, value: &Value) -> Result<(), Strin
         }
         "font_size" => config.font_size = positive_number(key, value)?,
         "line_height" => config.line_height = positive_number(key, value)?,
+        "background_opacity" => config.background_opacity = unit_number(key, value)?,
+        "background_blur" => config.background_blur = boolean(key, value)?,
         "theme" => {
             let name = string(key, value)?;
             config.theme = theme::builtin(&name)
@@ -101,6 +103,8 @@ fn get_option(lua: &Lua, config: &Config, key: &str) -> Result<Value, String> {
         "font_size" => Ok(Value::Number(config.font_size.into())),
         "line_height" => Ok(Value::Number(config.line_height.into())),
         "theme" => string(&config.theme.name),
+        "background_opacity" => Ok(Value::Number(config.background_opacity.into())),
+        "background_blur" => Ok(Value::Boolean(config.background_blur)),
         _ => Err(unknown(key)),
     }
 }
@@ -131,13 +135,36 @@ fn string(key: &str, value: &Value) -> Result<String, String> {
     }
 }
 
+fn boolean(key: &str, value: &Value) -> Result<bool, String> {
+    match value {
+        Value::Boolean(flag) => Ok(*flag),
+        _ => Err(type_error(key, "boolean", value)),
+    }
+}
+
+/// 0 以上 1 以下の数値。
+fn unit_number(key: &str, value: &Value) -> Result<f32, String> {
+    let number = number(key, value)?;
+    if (0.0..=1.0).contains(&number) {
+        Ok(number as f32)
+    } else {
+        Err(format!(
+            "kugutsu.opt.{key}: expected a number between 0 and 1, got {number}"
+        ))
+    }
+}
+
+fn number(key: &str, value: &Value) -> Result<f64, String> {
+    match *value {
+        Value::Integer(n) => Ok(n as f64),
+        Value::Number(n) => Ok(n),
+        _ => Err(type_error(key, "number", value)),
+    }
+}
+
 /// 有限で 0 より大きい数値。
 fn positive_number(key: &str, value: &Value) -> Result<f32, String> {
-    let number = match *value {
-        Value::Integer(n) => n as f64,
-        Value::Number(n) => n,
-        _ => return Err(type_error(key, "number", value)),
-    };
+    let number = number(key, value)?;
     if number.is_finite() && number > 0.0 {
         Ok(number as f32)
     } else {
@@ -301,6 +328,44 @@ mod tests {
         eval_err(
             "kugutsu.opt.theme = 1",
             "kugutsu.opt.theme: expected string, got number",
+        );
+    }
+
+    #[test]
+    fn sets_background_transparency() {
+        let config =
+            eval_ok("kugutsu.opt.background_opacity = 0.85\nkugutsu.opt.background_blur = true");
+        assert_eq!(config.background_opacity, 0.85);
+        assert!(config.background_blur);
+        assert_eq!(
+            eval_ok("kugutsu.opt.background_opacity = 0").background_opacity,
+            0.0
+        );
+        assert_eq!(
+            eval_ok("kugutsu.opt.background_opacity = 1").background_opacity,
+            1.0
+        );
+        eval_ok(
+            "assert(kugutsu.opt.background_opacity == 1)\nassert(kugutsu.opt.background_blur == false)",
+        );
+    }
+
+    #[test]
+    fn invalid_background_transparency_is_an_error() {
+        for value in ["1.5", "-0.1", "0/0", "math.huge"] {
+            let config = eval_err(
+                &format!("kugutsu.opt.background_opacity = {value}"),
+                "kugutsu.opt.background_opacity: expected a number between 0 and 1",
+            );
+            assert_eq!(config.background_opacity, 1.0);
+        }
+        eval_err(
+            "kugutsu.opt.background_opacity = 'half'",
+            "kugutsu.opt.background_opacity: expected number, got string",
+        );
+        eval_err(
+            "kugutsu.opt.background_blur = 1",
+            "kugutsu.opt.background_blur: expected boolean, got number",
         );
     }
 

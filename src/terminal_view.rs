@@ -415,9 +415,9 @@ impl Render for TerminalView {
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
+            // 既定の背景はペイン領域が（背景の不透明度を掛けて）塗る。重ねて塗ると透過が濃くなるので塗らない
             .size_full()
             .p(px(PADDING))
-            .bg(rgb(self.colors.background))
             .child(
                 canvas(
                     // 要素自身の大きさからグリッドサイズを決める。変わっていれば PTY をリサイズし、

@@ -60,10 +60,14 @@ const AGENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// キーマップ一覧の後ろに敷く半透明の背景（RGBA）。
 const KEYMAP_BACKDROP: u32 = 0x000000aa;
 /// キーマップ一覧のキー列の幅。
-const KEYMAP_KEY_COLUMN_WIDTH: f32 = 110.0;
+const KEYMAP_KEY_COLUMN_WIDTH: f32 = 130.0;
 /// which-key の 1 項目（キー＋説明）の幅と、そのうちキー部分の幅。
 const WHICH_KEY_ITEM_WIDTH: f32 = 220.0;
-const WHICH_KEY_KEY_WIDTH: f32 = 56.0;
+const WHICH_KEY_KEY_WIDTH: f32 = 64.0;
+/// which-key のパネルの最大幅（項目 3 列分と余白）。
+const WHICH_KEY_MAX_WIDTH: f32 = 3.0 * WHICH_KEY_ITEM_WIDTH + 28.0;
+/// 浮いたパネルと画面の端・ステータスラインとの間隔。
+const OVERLAY_MARGIN: f32 = 8.0;
 
 struct Pane {
     view: Entity<TerminalView>,
@@ -1009,95 +1013,109 @@ impl WorkspaceView {
                     .debug_selector(move || selector)
                     .flex()
                     .flex_none()
+                    .items_center()
                     .gap(px(8.0))
                     .w(px(WHICH_KEY_ITEM_WIDTH))
                     .overflow_hidden()
                     .child(
-                        div()
-                            .flex_none()
-                            .w(px(WHICH_KEY_KEY_WIDTH))
-                            .text_color(rgb(self.config.theme.ui.prefix_indicator))
-                            .child(key),
+                        div().flex().flex_none().w(px(WHICH_KEY_KEY_WIDTH)).child(
+                            keycap(&self.config.theme.ui, &key)
+                                .debug_selector(move || format!("which-key-cap:{key}")),
+                        ),
                     )
                     .child(
                         div()
                             .min_w(px(0.0))
                             .truncate()
-                            .text_color(rgb(self.config.theme.terminal.foreground))
+                            .text_color(rgb(self.config.theme.ui.foreground))
                             .child(description),
                     )
             });
-        div()
+        // ステータスラインの上に浮かせたパネル
+        overlay_panel(&self.config.theme.ui)
             .debug_selector(|| "which-key".into())
             .absolute()
-            .left_0()
-            .right_0()
-            .bottom(px(STATUS_LINE_HEIGHT))
+            .left(px(OVERLAY_MARGIN))
+            .bottom(px(STATUS_LINE_HEIGHT + OVERLAY_MARGIN))
+            .max_w(px(WHICH_KEY_MAX_WIDTH))
             .flex()
             .flex_wrap()
-            .gap_y(px(4.0))
-            .px(px(12.0))
-            .py(px(8.0))
-            .text_size(px(12.0))
-            .bg(rgb(self.config.theme.ui.bar_background))
-            .border_t_1()
-            .border_color(rgb(self.config.theme.ui.bar_border))
+            .gap_y(px(6.0))
+            .px(px(14.0))
+            .py(px(10.0))
+            .text_size(px(TEXT_MD))
             .children(items)
     }
 
     /// ウィンドウ全体に重ねるキーマップ一覧。背景をクリックすると閉じる。
     fn render_keymap_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let prefix = self.prefix_label();
-        let keymap = self.keymap.keymap();
-        // prefix 付きの割り当ての後に、prefix を使わない割り当てを並べる
-        let prefixed = keymap
-            .entries()
+        let ui = &self.config.theme.ui;
+        // 分類ごとに見出しを付け、prefix 付きの割り当ての後に prefix を使わない割り当てを並べる
+        let groups = self
+            .keymap
+            .keymap()
+            .help_groups(&self.prefix_label())
             .into_iter()
-            .map(|(key, description)| (format!("{prefix} {key}"), description));
-        let rows = prefixed
-            .chain(keymap.direct_entries())
-            .map(|(key, description)| {
-                let selector = format!("keymap-help:{key}:{description}");
+            .map(|(group, entries)| {
+                let rows = entries.into_iter().map(|(key, description)| {
+                    let selector = format!("keymap-help:{key}:{description}");
+                    div()
+                        .debug_selector(move || selector)
+                        .flex()
+                        .items_center()
+                        .gap(px(16.0))
+                        .child(
+                            div()
+                                .flex()
+                                .w(px(KEYMAP_KEY_COLUMN_WIDTH))
+                                .flex_none()
+                                .child(keycap(ui, &key)),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(0.0))
+                                .truncate()
+                                .text_color(rgb(ui.foreground))
+                                .child(description),
+                        )
+                });
+                let name = group.label().to_lowercase();
                 div()
-                    .debug_selector(move || selector)
+                    .debug_selector(move || format!("keymap-help-group-{name}"))
                     .flex()
-                    .gap(px(16.0))
+                    .flex_col()
+                    .gap(px(5.0))
                     .child(
                         div()
-                            .w(px(KEYMAP_KEY_COLUMN_WIDTH))
-                            .flex_none()
-                            .text_color(rgb(self.config.theme.ui.prefix_indicator))
-                            .child(key),
+                            .pb(px(2.0))
+                            .text_size(px(TEXT_SM))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(ui.inactive_foreground))
+                            .child(group.label().to_uppercase()),
                     )
-                    .child(
-                        div()
-                            .text_color(rgb(self.config.theme.terminal.foreground))
-                            .child(description),
-                    )
+                    .children(rows)
             });
-        let panel = div()
+        let panel = overlay_panel(ui)
             .id("keymap-help")
             .debug_selector(|| "keymap-help".into())
             .occlude()
             .flex()
             .flex_col()
-            .gap(px(4.0))
-            .p(px(16.0))
-            .text_size(px(12.0))
-            .bg(rgb(self.config.theme.ui.bar_background))
-            .border_1()
-            .border_color(rgb(self.config.theme.ui.bar_border))
+            .gap(px(14.0))
+            .p(px(20.0))
+            .text_size(px(TEXT_MD))
             .child(
                 div()
-                    .pb(px(8.0))
-                    .text_color(rgb(self.config.theme.ui.inactive_foreground))
-                    .child("KEY BINDINGS"),
+                    .text_size(px(TEXT_LG))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(ui.foreground))
+                    .child("Key bindings"),
             )
-            .children(rows)
+            .children(groups)
             .child(
                 div()
-                    .pt(px(8.0))
-                    .text_color(rgb(self.config.theme.ui.inactive_foreground))
+                    .text_size(px(TEXT_SM))
+                    .text_color(rgb(ui.inactive_foreground))
                     .child("esc / q to close"),
             );
         div()
@@ -1113,6 +1131,37 @@ impl WorkspaceView {
             .on_click(cx.listener(|this, _, _, cx| this.close_keymap_help(cx)))
             .child(panel)
     }
+}
+
+/// which-key やキーマップ一覧に使う、浮いたパネル。
+fn overlay_panel(ui: &UiColors) -> gpui::Div {
+    div()
+        .rounded(px(8.0))
+        .border_1()
+        .border_color(rgb(ui.strong_border))
+        .bg(rgb(ui.overlay_background))
+        .shadow(vec![BoxShadow {
+            color: with_alpha(0x000000, 0.45).into(),
+            offset: point(px(0.0), px(6.0)),
+            blur_radius: px(20.0),
+            spread_radius: px(0.0),
+        }])
+}
+
+/// キーをキーキャップ風に描く。
+fn keycap(ui: &UiColors, key: &str) -> gpui::Div {
+    div()
+        .flex_none()
+        .px(px(6.0))
+        .py(px(1.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_b_2()
+        .border_color(rgb(ui.strong_border))
+        .bg(rgb(ui.raised_background))
+        .text_size(px(TEXT_SM))
+        .text_color(rgb(ui.foreground))
+        .child(key.to_string())
 }
 
 /// 分割の中でのペインの立場。
@@ -2388,7 +2437,15 @@ mod tests {
         cx.simulate_keystrokes("ctrl-b");
         cx.run_until_parked();
         let which_key = bounds(cx, "which-key");
-        assert_eq!(which_key.bottom(), bounds(cx, "status-line").top());
+        // ステータスラインから少し浮かせ、左右の端にも付けない
+        assert_eq!(
+            bounds(cx, "status-line").top() - which_key.bottom(),
+            px(OVERLAY_MARGIN)
+        );
+        assert_eq!(which_key.left(), px(OVERLAY_MARGIN));
+        // キーはキーキャップとして説明と分けて描く
+        let keycap = bounds(cx, "which-key-cap:c");
+        assert!(which_key.contains(&keycap.center()));
         // ターミナルを縮めず（リサイズさせず）上に重ねる
         assert_eq!(bounds(cx, "panes"), panes_before);
 
@@ -2517,6 +2574,14 @@ mod tests {
             cx.debug_bounds("keymap-help:ctrl-shift-t:Tab right away")
                 .is_some()
         );
+        // 分類ごとの見出しの下に並ぶ
+        let tabs = bounds(cx, "keymap-help-group-tabs");
+        assert!(tabs.contains(&bounds(cx, "keymap-help:ctrl-b t:Open a tab").center()));
+        assert!(tabs.contains(&bounds(cx, "keymap-help:ctrl-shift-t:Tab right away").center()));
+        let panes = bounds(cx, "keymap-help-group-panes");
+        assert!(panes.contains(&bounds(cx, "keymap-help:ctrl-b x:Close pane").center()));
+        assert!(cx.debug_bounds("keymap-help-group-workspaces").is_some());
+        assert!(cx.debug_bounds("keymap-help-group-general").is_some());
     }
 
     #[gpui::test]

@@ -334,13 +334,13 @@ mod tests {
                     1,
                     "b",
                     Style {
-                        fg: 0x00bc00,
+                        fg: 0x3f7d4f,
                         ..Style::plain(&light)
                     }
                 ),
             ]
         );
-        assert_eq!(Style::plain(&light).bg, 0xffffff);
+        assert_eq!(Style::plain(&light).bg, 0xfafafa);
     }
 
     #[test]

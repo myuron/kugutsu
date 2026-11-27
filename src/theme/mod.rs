@@ -72,6 +72,32 @@ pub struct UiColors {
     pub agent_done: u32,
     /// 設定のエラー表示。
     pub error: u32,
+    // 以下はテーマファイルで省略でき、省略すると上の色から導出する
+    /// UI の文字色（既定: `terminal.foreground`）。
+    pub foreground: u32,
+    /// アクティブなペインの枠・グローなどの強調色（既定: `active_pane_border`）。
+    pub accent: u32,
+    /// アクティブな項目の背景（既定: `bar_background` を `foreground` へ少し寄せた色）。
+    pub raised_background: u32,
+    /// モーダル・which-key の背景（既定: `raised_background` よりさらに寄せた色）。
+    pub overlay_background: u32,
+    /// ペインやモーダルの枠（既定: `bar_border`）。
+    pub strong_border: u32,
+}
+
+/// `raised_background` を省略したときに `bar_background` を `foreground` へ寄せる割合。
+const RAISED_MIX: f32 = 0.06;
+/// `overlay_background` を省略したときの割合。
+const OVERLAY_MIX: f32 = 0.1;
+
+/// 色 `a` と `b` を `t`（0.0 で `a`、1.0 で `b`）の割合で混ぜる。
+pub fn mix(a: u32, b: u32, t: f32) -> u32 {
+    let channel = |shift: u32| {
+        let from = ((a >> shift) & 0xff) as f32;
+        let to = ((b >> shift) & 0xff) as f32;
+        ((from + (to - from) * t).round() as u32 & 0xff) << shift
+    };
+    channel(16) | channel(8) | channel(0)
 }
 
 impl Default for Theme {
@@ -135,6 +161,14 @@ const UI_KEYS: [&str; 9] = [
     "agent_done",
     "error",
 ];
+/// 省略できる UI の色。
+const OPTIONAL_UI_KEYS: [&str; 5] = [
+    "foreground",
+    "accent",
+    "raised_background",
+    "overlay_background",
+    "strong_border",
+];
 
 fn read_theme(value: &Value) -> Result<(TerminalColors, UiColors), String> {
     let root = table(value).map_err(|reason| reason.to_string())?;
@@ -153,13 +187,37 @@ fn read_theme(value: &Value) -> Result<(TerminalColors, UiColors), String> {
     };
 
     let ui = table(&field(&root, "", "ui")?).map_err(|r| format!("ui: {r}"))?;
-    check_keys(&ui, "ui.", &UI_KEYS)?;
+    let allowed: Vec<&str> = UI_KEYS.iter().chain(&OPTIONAL_UI_KEYS).copied().collect();
+    check_keys(&ui, "ui.", &allowed)?;
     let ui_color = |key: &str| color_of(&ui, "ui.", key);
+    // 省略されていれば `fallback` を使う
+    let optional = |key: &str, fallback: u32| match ui.raw_get::<Value>(key) {
+        Ok(Value::Nil) => Ok(fallback),
+        Ok(value) => color(&value, &format!("ui.{key}")),
+        Err(err) => Err(format!("ui.{key}: {err}")),
+    };
+    let bar_background = ui_color("bar_background")?;
+    let bar_border = ui_color("bar_border")?;
+    let active_pane_border = ui_color("active_pane_border")?;
+    let foreground = optional("foreground", terminal_colors.foreground)?;
+    let raised_background = optional(
+        "raised_background",
+        mix(bar_background, foreground, RAISED_MIX),
+    )?;
+    let overlay_background = optional(
+        "overlay_background",
+        mix(bar_background, foreground, OVERLAY_MIX),
+    )?;
     let ui_colors = UiColors {
-        bar_background: ui_color("bar_background")?,
-        bar_border: ui_color("bar_border")?,
+        foreground,
+        accent: optional("accent", active_pane_border)?,
+        raised_background,
+        overlay_background,
+        strong_border: optional("strong_border", bar_border)?,
+        bar_background,
+        bar_border,
         inactive_foreground: ui_color("inactive_foreground")?,
-        active_pane_border: ui_color("active_pane_border")?,
+        active_pane_border,
         prefix_indicator: ui_color("prefix_indicator")?,
         agent_working: ui_color("agent_working")?,
         agent_blocked: ui_color("agent_blocked")?,
@@ -239,8 +297,8 @@ mod tests {
     use super::*;
 
     const DARK_ANSI: [u32; 16] = [
-        0x000000, 0xcd3131, 0x0dbc79, 0xe5e510, 0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5, 0x666666,
-        0xf14c4c, 0x23d18b, 0xf5f543, 0x3b8eea, 0xd670d6, 0x29b8db, 0xffffff,
+        0x1a1b1d, 0xc26a6a, 0x7aa886, 0xd1a257, 0x7f9ab8, 0xa58bb5, 0x7fa8a8, 0xc9c9c9, 0x5a5a5a,
+        0xd68282, 0x8fbf9b, 0xe0b874, 0x98b0cc, 0xbba2c9, 0x96bfbf, 0xececec,
     ];
 
     /// `kugutsu-dark` の table を `edit` で書き換えたテーマファイル。
@@ -266,30 +324,35 @@ mod tests {
     }
 
     #[test]
-    fn dark_theme_keeps_the_original_colors() {
+    fn dark_theme_uses_the_monochrome_palette() {
         let theme = Theme::default();
         assert_eq!(theme.name, "kugutsu-dark");
         assert_eq!(
             theme.terminal,
             TerminalColors {
-                foreground: 0xd4d4d4,
-                background: 0x1e1e1e,
-                cursor: 0xaeafad,
+                foreground: 0xc9c9c9,
+                background: 0x0a0a0b,
+                cursor: 0xb5b5b5,
                 ansi: DARK_ANSI,
             }
         );
         assert_eq!(
             theme.ui,
             UiColors {
-                bar_background: 0x181818,
-                bar_border: 0x2b2b2b,
-                inactive_foreground: 0x8a8a8a,
-                active_pane_border: 0x569cd6,
-                prefix_indicator: 0xdcdcaa,
-                agent_working: 0x569cd6,
-                agent_blocked: 0xe5c07b,
-                agent_done: 0x89d185,
-                error: 0xf14c4c,
+                bar_background: 0x060606,
+                bar_border: 0x1a1b1d,
+                inactive_foreground: 0x808080,
+                active_pane_border: 0xb5b5b5,
+                prefix_indicator: 0xececec,
+                agent_working: 0xb5b5b5,
+                agent_blocked: 0xd1a257,
+                agent_done: 0x7aa886,
+                error: 0xc26a6a,
+                foreground: 0xc9c9c9,
+                accent: 0xb5b5b5,
+                raised_background: 0x111213,
+                overlay_background: 0x18191b,
+                strong_border: 0x222326,
             }
         );
     }
@@ -297,10 +360,74 @@ mod tests {
     #[test]
     fn light_theme_is_bundled() {
         let theme = builtin("kugutsu-light").unwrap();
-        assert_eq!(theme.terminal.background, 0xffffff);
-        assert_eq!(theme.terminal.foreground, 0x333333);
-        assert_eq!(theme.ui.bar_background, 0xf3f3f3);
+        assert_eq!(theme.terminal.background, 0xfafafa);
+        assert_eq!(theme.terminal.foreground, 0x2a2a2b);
+        assert_eq!(theme.ui.bar_background, 0xf0f0f0);
+        assert_eq!(theme.ui.overlay_background, 0xffffff);
         assert!(builtin("no-such-theme").is_none());
+    }
+
+    /// 任意のキーを除いた、以前の形式のテーマファイル。
+    const LEGACY: &str = r##"return {
+  terminal = {
+    foreground = "#d4d4d4", background = "#1e1e1e", cursor = "#aeafad",
+    ansi = {
+      "#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
+      "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff",
+    },
+  },
+  ui = {
+    bar_background = "#000000", bar_border = "#2b2b2b", inactive_foreground = "#8a8a8a",
+    active_pane_border = "#569cd6", prefix_indicator = "#dcdcaa", agent_working = "#569cd6",
+    agent_blocked = "#e5c07b", agent_done = "#89d185", error = "#f14c4c",
+  },
+}"##;
+
+    #[test]
+    fn optional_ui_keys_fall_back_to_the_required_ones() {
+        let theme = parse(LEGACY, "legacy").unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(theme.ui.foreground, 0xd4d4d4);
+        assert_eq!(theme.ui.accent, 0x569cd6);
+        assert_eq!(theme.ui.strong_border, 0x2b2b2b);
+        // バーの背景を文字色の方へ少し寄せる
+        assert_eq!(
+            theme.ui.raised_background,
+            mix(0x000000, 0xd4d4d4, RAISED_MIX)
+        );
+        assert_eq!(
+            theme.ui.overlay_background,
+            mix(0x000000, 0xd4d4d4, OVERLAY_MIX)
+        );
+        assert_ne!(theme.ui.raised_background, theme.ui.bar_background);
+    }
+
+    #[test]
+    fn optional_ui_keys_override_the_fallbacks() {
+        let source = LEGACY.replace(
+            r##"error = "#f14c4c","##,
+            r##"error = "#f14c4c", accent = "#123456", raised_background = "#010203","##,
+        );
+        let theme = parse(&source, "legacy").unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(theme.ui.accent, 0x123456);
+        assert_eq!(theme.ui.raised_background, 0x010203);
+        // 指定しなかったものはフォールバックのまま
+        assert_eq!(theme.ui.strong_border, 0x2b2b2b);
+    }
+
+    #[test]
+    fn invalid_optional_colors_are_errors() {
+        parse_err(
+            &dark_with("theme.ui.accent = 1"),
+            "test: ui.accent: expected a color like \"#rrggbb\", got number",
+        );
+    }
+
+    #[test]
+    fn mix_blends_each_channel() {
+        assert_eq!(mix(0x000000, 0xffffff, 0.0), 0x000000);
+        assert_eq!(mix(0x000000, 0xffffff, 1.0), 0xffffff);
+        assert_eq!(mix(0x000000, 0xc8c8c8, 0.5), 0x646464);
+        assert_eq!(mix(0x102030, 0x102030, 0.3), 0x102030);
     }
 
     #[test]

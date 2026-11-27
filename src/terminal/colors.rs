@@ -154,9 +154,9 @@ mod tests {
     fn color_requests_follow_the_theme() {
         let theme = light();
         let request = |index| index_to_rgb(index, &Colors::default(), &theme);
-        assert_eq!(request(257), Some(unpack(0xffffff)));
-        assert_eq!(request(256), Some(unpack(0x333333)));
-        assert_eq!(request(4), Some(unpack(0x0451a5)));
+        assert_eq!(request(257), Some(unpack(0xfafafa)));
+        assert_eq!(request(256), Some(unpack(0x2a2a2b)));
+        assert_eq!(request(4), Some(unpack(0x3f5f88)));
     }
 
     #[test]
@@ -173,13 +173,13 @@ mod tests {
     fn named_colors_follow_the_theme() {
         let theme = light();
         let rgb = |named| to_rgb(Color::Named(named), &Colors::default(), &theme);
-        assert_eq!(rgb(NamedColor::Foreground), 0x333333);
-        assert_eq!(rgb(NamedColor::Background), 0xffffff);
-        assert_eq!(rgb(NamedColor::Cursor), 0x5a5a5a);
-        assert_eq!(rgb(NamedColor::Green), 0x00bc00);
+        assert_eq!(rgb(NamedColor::Foreground), 0x2a2a2b);
+        assert_eq!(rgb(NamedColor::Background), 0xfafafa);
+        assert_eq!(rgb(NamedColor::Cursor), 0x4a4a4a);
+        assert_eq!(rgb(NamedColor::Green), 0x3f7d4f);
         assert_eq!(
             to_rgb(Color::Indexed(10), &Colors::default(), &theme),
-            0x14ce14
+            0x4f8f5f
         );
     }
 

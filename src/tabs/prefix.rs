@@ -101,6 +101,46 @@ impl Command {
     }
 }
 
+/// キーマップ一覧で動作をまとめる分類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    Tabs,
+    Panes,
+    Workspaces,
+    /// サイドバー・キーマップ一覧・Lua 関数など。
+    General,
+}
+
+impl Group {
+    /// キーマップ一覧に並べる順。
+    pub const ALL: [Group; 4] = [Group::Tabs, Group::Panes, Group::Workspaces, Group::General];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Group::Tabs => "Tabs",
+            Group::Panes => "Panes",
+            Group::Workspaces => "Workspaces",
+            Group::General => "General",
+        }
+    }
+}
+
+impl Command {
+    /// キーマップ一覧での分類。
+    pub fn group(self) -> Group {
+        match self {
+            Command::NewTab | Command::NextTab | Command::PrevTab | Command::SelectTab(_) => {
+                Group::Tabs
+            }
+            Command::Split(_) | Command::Focus(_) | Command::ClosePane => Group::Panes,
+            Command::NewWorkspace | Command::NextWorkspace | Command::PrevWorkspace => {
+                Group::Workspaces
+            }
+            Command::ToggleSidebar | Command::ShowKeymap => Group::General,
+        }
+    }
+}
+
 /// キーに割り当てる動作。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -115,6 +155,14 @@ impl Action {
         match self {
             Action::Command(command) => command.description(),
             Action::Lua(_) => "Lua function",
+        }
+    }
+
+    /// キーマップ一覧での分類。Lua 関数は何をするか分からないので General にする。
+    fn group(&self) -> Group {
+        match self {
+            Action::Command(command) => command.group(),
+            Action::Lua(_) => Group::General,
         }
     }
 }
@@ -267,35 +315,80 @@ impl Keymap {
     /// which-key に出す（prefix の後のキー, 説明）。prefix 付きの割り当てだけを並べ、
     /// 隣り合う同じ説明の行はまとめる（連続した数字は `1-9`、それ以外は `t/shift-t`）。
     pub fn entries(&self) -> Vec<(String, String)> {
-        let mut groups: Vec<(Vec<String>, &str)> = Vec::new();
+        self.prefixed_entries()
+            .into_iter()
+            .map(|(key, desc, _)| (key, desc))
+            .collect()
+    }
+
+    /// [`Keymap::entries`] に、割り当てた動作の分類を添えたもの。
+    fn prefixed_entries(&self) -> Vec<(String, String, Group)> {
+        let mut runs: Vec<(Vec<String>, &str, Group)> = Vec::new();
         for binding in &self.bindings {
             let Trigger::Prefixed(keystroke) = &binding.trigger else {
                 continue;
             };
             let key = keystroke.unparse();
-            match groups.last_mut() {
-                Some((keys, desc)) if *desc == binding.desc => keys.push(key),
-                _ => groups.push((vec![key], &binding.desc)),
+            let group = binding.action.group();
+            match runs.last_mut() {
+                Some((keys, desc, last)) if *desc == binding.desc && *last == group => {
+                    keys.push(key)
+                }
+                _ => runs.push((vec![key], &binding.desc, group)),
             }
         }
-        groups
-            .into_iter()
-            .flat_map(|(keys, desc)| {
+        runs.into_iter()
+            .flat_map(|(keys, desc, group)| {
                 join_keys(&keys)
                     .into_iter()
-                    .map(move |key| (key, desc.to_string()))
+                    .map(move |key| (key, desc.to_string(), group))
             })
             .collect()
     }
 
     /// prefix を使わない割り当ての（キー, 説明）。
+    #[cfg(test)]
     pub fn direct_entries(&self) -> Vec<(String, String)> {
+        self.direct_entries_with_group()
+            .into_iter()
+            .map(|(key, desc, _)| (key, desc))
+            .collect()
+    }
+
+    fn direct_entries_with_group(&self) -> Vec<(String, String, Group)> {
         self.bindings
             .iter()
             .filter_map(|binding| match &binding.trigger {
-                Trigger::Direct(keystroke) => Some((keystroke.unparse(), binding.desc.clone())),
+                Trigger::Direct(keystroke) => Some((
+                    keystroke.unparse(),
+                    binding.desc.clone(),
+                    binding.action.group(),
+                )),
                 Trigger::Prefixed(_) => None,
             })
+            .collect()
+    }
+
+    /// キーマップ一覧に出す、分類ごとの（キー, 説明）。prefix 付きのキーは `prefix` を前に付け、
+    /// prefix を使わない割り当ての前に並べる。割り当ての無い分類は省く。
+    pub fn help_groups(&self, prefix: &str) -> Vec<(Group, Vec<(String, String)>)> {
+        let entries: Vec<_> = self
+            .prefixed_entries()
+            .into_iter()
+            .map(|(key, desc, group)| (format!("{prefix} {key}"), desc, group))
+            .chain(self.direct_entries_with_group())
+            .collect();
+        Group::ALL
+            .into_iter()
+            .map(|group| {
+                let rows = entries
+                    .iter()
+                    .filter(|(_, _, candidate)| *candidate == group)
+                    .map(|(key, desc, _)| (key.clone(), desc.clone()))
+                    .collect();
+                (group, rows)
+            })
+            .filter(|(_, rows): &(Group, Vec<_>)| !rows.is_empty())
             .collect()
     }
 }
@@ -707,6 +800,61 @@ mod tests {
             keymap.direct_entries(),
             vec![("ctrl-shift-t".to_string(), "New tab".to_string())]
         );
+    }
+
+    #[test]
+    fn commands_belong_to_groups() {
+        assert_eq!(Command::NewTab.group(), Group::Tabs);
+        assert_eq!(Command::SelectTab(2).group(), Group::Tabs);
+        assert_eq!(Command::Split(Axis::Vertical).group(), Group::Panes);
+        assert_eq!(Command::Focus(Direction::Left).group(), Group::Panes);
+        assert_eq!(Command::ClosePane.group(), Group::Panes);
+        assert_eq!(Command::NewWorkspace.group(), Group::Workspaces);
+        assert_eq!(Command::PrevWorkspace.group(), Group::Workspaces);
+        assert_eq!(Command::ToggleSidebar.group(), Group::General);
+        assert_eq!(Command::ShowKeymap.group(), Group::General);
+        assert_eq!(Group::Workspaces.label(), "Workspaces");
+    }
+
+    #[test]
+    fn help_groups_bindings_in_a_fixed_order() {
+        let mut keymap = Keymap::default();
+        keymap.set(
+            trigger("ctrl-shift-t"),
+            Action::Command(Command::NewTab),
+            None,
+        );
+        let groups = keymap.help_groups("ctrl-b");
+        let names: Vec<_> = groups.iter().map(|(group, _)| *group).collect();
+        assert_eq!(
+            names,
+            [Group::Tabs, Group::Panes, Group::Workspaces, Group::General]
+        );
+        let tabs = &groups[0].1;
+        let entry = |key: &str, desc: &str| (key.to_string(), desc.to_string());
+        assert_eq!(tabs[0], entry("ctrl-b c", "New tab"));
+        assert!(tabs.contains(&entry("ctrl-b 1-9", "Select tab N")));
+        // prefix を使わない割り当ては、prefix 付きの後に並べる
+        assert_eq!(tabs.last(), Some(&entry("ctrl-shift-t", "New tab")));
+        assert!(
+            groups[3]
+                .1
+                .contains(&entry("ctrl-b ?", "Show key bindings"))
+        );
+    }
+
+    #[test]
+    fn help_groups_skip_empty_groups() {
+        let mut keymap = Keymap::default();
+        for key in ["shift-c", "shift-n", "shift-p"] {
+            keymap.del(&trigger(&format!("<prefix>{key}")));
+        }
+        let names: Vec<_> = keymap
+            .help_groups("ctrl-b")
+            .into_iter()
+            .map(|(group, _)| group)
+            .collect();
+        assert_eq!(names, [Group::Tabs, Group::Panes, Group::General]);
     }
 
     #[test]

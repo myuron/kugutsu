@@ -42,6 +42,25 @@ pub struct Config {
     pub background_opacity: f32,
     /// 透過したウィンドウの後ろをぼかすようコンポジタに頼むか。
     pub background_blur: bool,
+    /// UI（バー・サイドバーなど）のフォント。`None` ならインストール済みのフォントから選ぶ。
+    pub ui_font_family: Option<String>,
+    /// 分割時に非アクティブなペインに掛ける不透明度（0.0〜1.0、1.0 で薄くしない）。
+    pub inactive_pane_opacity: f32,
+    /// `kugutsu.ui` で設定する見た目。
+    pub ui: UiConfig,
+}
+
+/// `kugutsu.ui` で設定する見た目。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiConfig {
+    /// workspace ライン・タブバーの各項目の幅（px）。両方の段で揃える。
+    pub item_width: f32,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self { item_width: 150.0 }
+    }
 }
 
 impl Config {
@@ -76,6 +95,9 @@ impl Default for Config {
             theme: Theme::default(),
             background_opacity: 1.0,
             background_blur: false,
+            ui_font_family: None,
+            inactive_pane_opacity: 0.85,
+            ui: UiConfig::default(),
         }
     }
 }

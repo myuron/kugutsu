@@ -11,11 +11,14 @@ Kugutsu is an ADE (Agentic Development Environment) written in Rust with [gpui](
 It is a terminal workspace for running coding agents side by side:
 
 - **Workspaces, tabs and panes** — group terminals into workspaces, open multiple tabs, and split panes vertically or horizontally, all driven by tmux-style prefix keys.
-- **Agent sidebar** — detects coding agents running in each terminal (Claude Code, Codex) and shows their state at a glance:
-  - `working` — the agent is processing
-  - `blocked` — the agent is waiting for your answer (e.g. a permission prompt)
-  - `done` — the agent finished while you were looking elsewhere
-  - `idle` — the agent is waiting for input
+- **Agent sidebar** — detects coding agents running in each terminal (Claude Code, Codex) and lists them under their workspace with their tab and pane. Each state has its own icon and color, so the agents that need you stand out:
+  - `working` (spinner) — the agent is processing
+  - `blocked` (alert, pulsing on a tinted row) — the agent is waiting for your answer (e.g. a permission prompt)
+  - `done` (check) — the agent finished while you were looking elsewhere
+  - `idle` (hollow circle) — the agent is waiting for input
+
+  The sidebar header shows how many agents are blocked, and the workspace and tab bars show a dot for each agent state. Click an agent to jump to its pane.
+- **Status line** — the prefix key on the left, where you are (`Workspace 1 › 1: kugutsu › pane 1/3`) in the middle, and the number of working, blocked and done agents on the right.
 - **IME support** — compose and commit text with an input method inside the terminal.
 
 ## Quick Start
@@ -94,6 +97,9 @@ kugutsu.opt.font_size = 14
 kugutsu.opt.line_height = 1.3
 kugutsu.opt.theme = "kugutsu-light"
 kugutsu.opt.background_opacity = 0.9
+kugutsu.opt.ui_font_family = "Inter"
+kugutsu.opt.inactive_pane_opacity = 0.85
+kugutsu.ui.item_width = 150
 ```
 
 | Option        | Type   | Default    | Description |
@@ -105,16 +111,24 @@ kugutsu.opt.background_opacity = 0.9
 | `theme`       | string | `"kugutsu-dark"` | Color theme (see [Themes](#themes)) |
 | `background_opacity` | number | `1.0` | Opacity of the background, from `0.0` (fully transparent) to `1.0` (opaque) |
 | `background_blur` | boolean | `false` | Blur what is behind a translucent window |
+| `ui_font_family` | string | first installed font of a built-in list of proportional fonts (Inter, Noto Sans, …) | Font of the bars, sidebar and status line. The terminal keeps `font_family` |
+| `inactive_pane_opacity` | number | `0.85` | Opacity of the panes that are not active when a tab is split, from `0.0` to `1.0` (`1.0` turns dimming off) |
+
+`kugutsu.ui` holds options for the layout of the UI:
+
+| Option        | Type   | Default    | Description |
+| ------------- | ------ | ---------- | ----------- |
+| `item_width`  | number | `150`      | Width in pixels of each item in the workspace and tab bars. Both rows use the same width so they line up; longer labels are truncated |
 
 The following are errors:
 
 - Syntax errors and runtime errors in `init.lua`
-- Options other than the ones above (e.g. `kugutsu.opt.foo = 1`)
+- Options other than the ones above (e.g. `kugutsu.opt.foo = 1` or `kugutsu.ui.foo = 1`)
 - Values of the wrong type (e.g. `kugutsu.opt.font_size = "big"`)
-- A `prefix` that is not a valid keystroke, or an empty `font_family`
-- A `font_size` or `line_height` that is zero, negative, NaN or infinite
+- A `prefix` that is not a valid keystroke, or an empty `font_family` or `ui_font_family`
+- A `font_size`, `line_height` or `item_width` that is zero, negative, NaN or infinite
 - A `theme` that is not found (see [Themes](#themes)) or a theme file that is invalid
-- A `background_opacity` outside `0.0`–`1.0`, or NaN
+- A `background_opacity` or `inactive_pane_opacity` outside `0.0`–`1.0`, or NaN
 - Invalid key mappings (see [Key mappings](#key-mappings))
 - An invalid plugin spec, and errors while loading a plugin (see [Plugins](#plugins))
 
@@ -171,7 +185,7 @@ Mapping a key that is already mapped replaces it in place; a new key is added to
 
 A Lua function runs when the key is pressed. Inside it, `kugutsu.action.<name>()` runs one of the actions above, and `kugutsu.action.select_tab(n)` selects tab `n` (1–9). The actions run in order after the function returns. `kugutsu.action` can only be called from a mapped function, not while `init.lua` is loading. Errors raised by the function are shown in the status line.
 
-`opts.desc` is the description shown in the which-key list above the status line and in the key binding list (`Ctrl-b ?`). Without it, the default description of the action is used, or `Lua function` for a function. Adjacent mappings with the same description are shown as one row (e.g. `1-9  Select tab N`). The which-key list shows only `<prefix>` mappings.
+`opts.desc` is the description shown in the which-key list above the status line and in the key binding list (`Ctrl-b ?`). Without it, the default description of the action is used, or `Lua function` for a function. Adjacent mappings with the same description are shown as one row (e.g. `1-9  Select tab N`). The which-key list shows only `<prefix>` mappings. The key binding list groups the mappings into tabs, panes, workspaces and general; mapped Lua functions are listed under general.
 
 The following are errors:
 
@@ -201,27 +215,44 @@ A theme is a Lua file `colors/<name>.lua` that returns a table of colors written
 ```lua
 return {
   terminal = {
-    foreground = "#d4d4d4",
-    background = "#1e1e1e",
-    cursor = "#aeafad",
+    foreground = "#c9c9c9",
+    background = "#0a0a0b",          -- also the background of the panes
+    cursor = "#b5b5b5",
     -- 16 colors: black, red, green, yellow, blue, magenta, cyan, white, then the bright ones
-    ansi = { "#000000", "#cd3131", ... },
+    ansi = { "#1a1b1d", "#c26a6a", ... },
   },
   ui = {
-    bar_background = "#181818",      -- tab bars, sidebar and status line
-    bar_border = "#2b2b2b",          -- borders of the bars and pane separators
-    inactive_foreground = "#8a8a8a", -- inactive tabs and labels
-    active_pane_border = "#569cd6",  -- border around the active pane when split
-    prefix_indicator = "#dcdcaa",    -- prefix key in the status line
-    agent_working = "#569cd6",
-    agent_blocked = "#e5c07b",
-    agent_done = "#89d185",
-    error = "#f14c4c",               -- errors in the status line
+    bar_background = "#060606",      -- window, bars, sidebar and status line
+    bar_border = "#1a1b1d",          -- borders of the bars
+    inactive_foreground = "#808080", -- inactive items and secondary labels
+    active_pane_border = "#b5b5b5",  -- border around the active pane when split
+    prefix_indicator = "#ececec",    -- prefix key in the status line while it is pressed
+    agent_working = "#b5b5b5",
+    agent_blocked = "#d1a257",
+    agent_done = "#7aa886",
+    error = "#c26a6a",               -- errors in the status line
+
+    -- Optional
+    foreground = "#c9c9c9",          -- UI text
+    accent = "#b5b5b5",              -- glow around the active pane
+    raised_background = "#111213",   -- active items
+    overlay_background = "#18191b",  -- which-key and the key binding list
+    strong_border = "#222326",       -- borders of panes and floating panels
   },
 }
 ```
 
-Every key is required.
+The keys in `terminal` and the first group of `ui` keys are required. The optional `ui` keys fall back to colors derived from the required ones, so themes written before they existed keep working:
+
+| Key | Fallback |
+| --- | --- |
+| `foreground` | `terminal.foreground` |
+| `accent` | `active_pane_border` |
+| `raised_background` | `bar_background` mixed with 6% of `foreground` |
+| `overlay_background` | `bar_background` mixed with 10% of `foreground` |
+| `strong_border` | `bar_border` |
+
+The bundled themes keep colors for the agent states and use grays for everything else, so the agents that need attention stand out.
 
 ### Background transparency
 

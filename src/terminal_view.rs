@@ -155,6 +155,12 @@ impl TerminalView {
         self.agent
     }
 
+    /// Agent の状態を直接決める（表示のテスト用）。
+    #[cfg(test)]
+    pub fn set_agent(&mut self, agent: Option<AgentTracker>) {
+        self.agent = agent;
+    }
+
     /// フォアグラウンドのプロセスと画面から Agent の状態を更新する。`focused` はユーザーが
     /// このペインを見ているか。変化があれば true を返す。
     pub fn refresh_agent(&mut self, focused: bool) -> bool {

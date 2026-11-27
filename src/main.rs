@@ -2,6 +2,7 @@ mod agents;
 mod cli;
 mod config;
 mod font;
+mod icons;
 mod panes;
 mod plugins;
 mod tabs;
@@ -47,36 +48,38 @@ fn main() {
         }
     };
 
-    Application::new().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(800.0), px(500.0)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_background: config.config.window_background(),
-            ..Default::default()
-        };
-        let opened = cx.open_window(options, |window, cx| {
-            cx.new(|cx| {
-                WorkspaceView::new(
-                    terminal,
-                    events,
-                    SpawnOptions::default(),
-                    config,
-                    window,
-                    cx,
-                )
-            })
-        });
-        if let Err(err) = opened {
-            eprintln!("failed to open window: {err:#}");
-            cx.quit();
-        }
-        // macOS では最後のウィンドウを閉じてもアプリが終了しないため明示的に終了する
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
+    Application::new()
+        .with_assets(icons::Assets)
+        .run(move |cx: &mut App| {
+            let bounds = Bounds::centered(None, size(px(800.0), px(500.0)), cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_background: config.config.window_background(),
+                ..Default::default()
+            };
+            let opened = cx.open_window(options, |window, cx| {
+                cx.new(|cx| {
+                    WorkspaceView::new(
+                        terminal,
+                        events,
+                        SpawnOptions::default(),
+                        config,
+                        window,
+                        cx,
+                    )
+                })
+            });
+            if let Err(err) = opened {
+                eprintln!("failed to open window: {err:#}");
                 cx.quit();
             }
-        })
-        .detach();
-        cx.activate(true);
-    });
+            // macOS では最後のウィンドウを閉じてもアプリが終了しないため明示的に終了する
+            cx.on_window_closed(|cx| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
 }

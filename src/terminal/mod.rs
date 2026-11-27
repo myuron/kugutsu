@@ -370,7 +370,7 @@ mod tests {
             .iter()
             .map(|r| r.text())
             .collect();
-        assert!(text.contains("got:]11;rgb:ffff/ffff/ffff"), "{text:?}");
+        assert!(text.contains("got:]11;rgb:fafa/fafa/fafa"), "{text:?}");
     }
 
     #[test]

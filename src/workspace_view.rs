@@ -95,6 +95,8 @@ pub struct WorkspaceView {
     config: Config,
     /// `init.lua` の読み込みで起きたエラー。ステータスラインに表示する。
     config_errors: Vec<String>,
+    /// spec にあるが、まだインストールされていないプラグインの名前。
+    missing_plugins: Vec<String>,
     _agent_poll: Task<()>,
 }
 
@@ -112,6 +114,7 @@ impl WorkspaceView {
         let Loaded {
             config,
             errors: config_errors,
+            missing_plugins,
         } = config;
         let first = Self::create_pane(terminal, events, &config, window, cx);
         let this = Self {
@@ -119,6 +122,7 @@ impl WorkspaceView {
             keymap: PrefixKeymap::new(config.prefix.clone(), config.keymap.clone()),
             config,
             config_errors,
+            missing_plugins,
             spawn_options,
             sidebar_visible: true,
             keymap_help_visible: false,
@@ -666,10 +670,19 @@ impl WorkspaceView {
                         .child(self.prefix_label()),
                 )
             })
+            // 右寄せの表示をまとめる（どちらか片方だけでも右端に寄るように）
+            .child(div().flex_1())
+            .children(self.missing_plugins_message().map(|message| {
+                div()
+                    .debug_selector(|| "plugins-missing".into())
+                    .flex_none()
+                    .text_color(rgb(self.config.theme.ui.error))
+                    .child(message)
+            }))
             .children(self.config_error_message().map(|message| {
                 div()
                     .debug_selector(|| "config-error".into())
-                    .ml_auto()
+                    .ml(px(12.0))
                     .min_w(px(0.0))
                     .truncate()
                     .text_color(rgb(self.config.theme.ui.error))
@@ -685,6 +698,16 @@ impl WorkspaceView {
     /// ステータスラインに出す設定のエラー。エラーが無ければ `None`。
     fn config_error_message(&self) -> Option<String> {
         config_error_message(&self.config_errors)
+    }
+
+    /// ステータスラインに出す、インストールされていないプラグインの数。全部あれば `None`。
+    fn missing_plugins_message(&self) -> Option<String> {
+        (!self.missing_plugins.is_empty()).then(|| {
+            format!(
+                "plugins: {} missing — run kugutsu install",
+                self.missing_plugins.len()
+            )
+        })
     }
 
     /// prefix 入力待ちのとき、ステータスラインのすぐ上に重ねて出す次のキーの候補
@@ -1148,7 +1171,7 @@ mod tests {
         workspace.read_with(cx, |workspace, _| {
             assert_eq!(
                 workspace.config_error_message().as_deref(),
-                Some("init.lua:1: kugutsu.opt.theme: unknown theme 'nope'")
+                Some("kugutsu.opt.theme: unknown theme 'nope'")
             );
             assert_eq!(workspace.config.theme, crate::theme::Theme::default());
         });
@@ -1161,6 +1184,36 @@ mod tests {
         assert!(cx.debug_bounds("config-error").is_none());
         assert_eq!(
             workspace.read_with(cx, |workspace, _| workspace.config_error_message()),
+            None
+        );
+    }
+
+    #[gpui::test]
+    fn missing_plugins_are_shown_in_status_line(cx: &mut TestAppContext) {
+        let config = Loaded {
+            missing_plugins: vec!["a.kugutsu".into(), "b.kugutsu".into()],
+            errors: vec!["boom".into()],
+            ..Loaded::default()
+        };
+        let (workspace, cx) = open_workspace_with_config(cx, sleep_options(), config);
+        cx.run_until_parked();
+        let missing = bounds(cx, "plugins-missing");
+        assert!(bounds(cx, "status-line").contains(&missing.center()));
+        // 設定のエラーと並べて出す
+        assert!(missing.right() <= bounds(cx, "config-error").left());
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.missing_plugins_message()),
+            Some("plugins: 2 missing — run kugutsu install".to_string())
+        );
+    }
+
+    #[gpui::test]
+    fn no_missing_plugins_message_when_all_are_installed(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("plugins-missing").is_none());
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.missing_plugins_message()),
             None
         );
     }
@@ -1205,7 +1258,7 @@ mod tests {
                 theme: theme.clone(),
                 ..Config::default()
             },
-            errors: Vec::new(),
+            ..Loaded::default()
         };
         let (workspace, cx) = open_workspace_with_config(cx, sleep_options(), config);
         // 後から開いたタブのペインもテーマを使う

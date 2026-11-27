@@ -4,6 +4,7 @@
 //! テーマの table を返す（`colors/<name>.lua` のファイル名がテーマ名になる）。
 //! Kugutsu は `kugutsu-dark`（既定）と `kugutsu-light` を同梱している。
 
+use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use mlua::{Lua, Table, Value};
@@ -84,6 +85,25 @@ impl Default for Theme {
 /// 名前から同梱テーマを引く。
 pub fn builtin(name: &str) -> Option<&'static Theme> {
     BUILTIN.iter().find(|theme| theme.name == name)
+}
+
+/// 名前からテーマを探す。`dirs`（`colors/` ディレクトリ）を順に見て `<name>.lua` があれば
+/// それを読み、どこにも無ければ同梱テーマを使う。
+pub fn find(name: &str, dirs: &[PathBuf]) -> Result<Theme, String> {
+    let unknown = || format!("unknown theme '{name}'");
+    // ファイル名としてだけ使い、ほかのディレクトリを指せないようにする
+    if name.is_empty() || name.starts_with('.') || name.contains(['/', '\\']) {
+        return Err(unknown());
+    }
+    for dir in dirs {
+        let path = dir.join(format!("{name}.lua"));
+        match std::fs::read_to_string(&path) {
+            Ok(source) => return parse(&source, name),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(format!("{}: {err}", path.display())),
+        }
+    }
+    builtin(name).cloned().ok_or_else(unknown)
 }
 
 /// テーマファイルを評価してテーマを読み込む。`name` はテーマ名で、エラーメッセージにも使う。

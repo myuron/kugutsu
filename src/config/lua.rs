@@ -1,5 +1,5 @@
 //! `init.lua` の評価。`kugutsu.opt` への代入と `kugutsu.keymap` によるキーの割り当てを
-//! 検証して [`Config`] に書き込む。
+//! 検証して [`Config`] に書き込み、`kugutsu.plugins.setup` で宣言したプラグインを読み込む。
 
 use std::cell::RefCell;
 use std::fmt;
@@ -9,13 +9,16 @@ use gpui::Keystroke;
 use mlua::{Function, Lua, Table, Value};
 
 use super::{Config, Loaded};
+use crate::plugins::loader::{self, LuaPath};
+use crate::plugins::paths::Paths;
+use crate::plugins::spec::{self, PluginSpec, Spec};
 use crate::tabs::prefix::{Action, Command, PREFIX_PLACEHOLDER, Trigger};
 use crate::theme;
 
 /// `kugutsu` グローバルを組み立てる Lua コード。`set` / `get` などは Rust の関数で、
 /// 不正な値ならエラーメッセージを返す。`error(..., 2)` で呼び出した行をエラー位置にする。
 const PRELUDE: &str = r#"
-local set, get, keymap_set, keymap_del, action, action_names = ...
+local set, get, keymap_set, keymap_del, action, action_names, plugins_setup = ...
 local function check(err)
     if err then error(err, 3) end
 end
@@ -46,8 +49,36 @@ end
 actions.select_tab = function(number)
     check(action("select_tab", number))
 end
-kugutsu = { opt = opt, keymap = keymap, action = actions }
+local plugins = {
+    setup = function(spec)
+        check(plugins_setup(spec))
+    end,
+}
+kugutsu = { opt = opt, keymap = keymap, action = actions, plugins = plugins }
+-- Lua 5.4 の require はローダーのデータ（ファイルのパス）も返すので、
+-- `setup({ "a/b", require("plugins.ui") })` のように table の最後に書いても値が 1 つになるようにする
+local lua_require = require
+require = function(name)
+    local ok, result = pcall(lua_require, name)
+    if not ok then
+        -- エラー位置は require を呼んだ行にする
+        error(result, type(result) == "string" and 2 or 0)
+    end
+    return result
+end
 "#;
+
+/// 評価中に Lua から書き込む状態。
+#[derive(Debug, Default)]
+struct State {
+    config: Config,
+    /// `kugutsu.opt.theme` に代入された名前。テーマはプラグインを読み込んだ後に引く。
+    theme: Option<String>,
+    /// 最後の `kugutsu.plugins.setup` で宣言したプラグイン。
+    plugins: Vec<PluginSpec>,
+}
+
+type SharedState = Rc<RefCell<State>>;
 
 /// `kugutsu.action.*` が積む操作の行き先。`None` のときはキーマップの実行中ではない。
 type ActionQueue = Rc<RefCell<Option<Vec<Command>>>>;
@@ -88,16 +119,80 @@ impl PartialEq for LuaCallback {
 }
 
 /// Lua のソースを評価して設定を読み込む。`chunk_name` はエラーメッセージに出す名前。
-/// エラーが起きてもそこまでに設定された値は残す。
+/// エラーが起きてもそこまでに設定された値は残す。プラグインの置き場所は無いものとする。
+#[cfg(test)]
 pub fn evaluate(source: &str, chunk_name: &str) -> Loaded {
-    let config = Rc::new(RefCell::new(Config::default()));
-    let mut errors = match run(source, chunk_name, &config) {
-        Ok(()) => Vec::new(),
-        Err(err) => vec![error_message(&err)],
+    evaluate_with(source, chunk_name, None)
+}
+
+/// [`evaluate`] に加えて、`paths` の `lua/` を `require` でき、宣言したプラグインを読み込む。
+pub fn evaluate_with(source: &str, chunk_name: &str, paths: Option<&Paths>) -> Loaded {
+    evaluate_in(source, chunk_name, paths, true).0
+}
+
+/// プラグインを読み込まずに `init.lua` を評価し、プラグインの宣言とエラーを返す（CLI 用）。
+pub fn evaluate_spec(
+    source: &str,
+    chunk_name: &str,
+    paths: Option<&Paths>,
+) -> (Vec<Spec>, Vec<String>) {
+    let (loaded, specs) = evaluate_in(source, chunk_name, paths, false);
+    (specs, loaded.errors)
+}
+
+fn evaluate_in(
+    source: &str,
+    chunk_name: &str,
+    paths: Option<&Paths>,
+    load_plugins: bool,
+) -> (Loaded, Vec<Spec>) {
+    let state = SharedState::default();
+    let lua = Lua::new();
+    let mut errors = Vec::new();
+    let lua_path = match prepare(&lua, &state, paths) {
+        Ok(lua_path) => {
+            // `=` で始まる名前はそのままエラー位置に出る（`init.lua:3: ...`）
+            let result = lua.load(source).set_name(format!("={chunk_name}")).exec();
+            if let Err(err) = result {
+                errors.push(error_message(&err));
+            }
+            Some(lua_path)
+        }
+        Err(err) => {
+            errors.push(error_message(&err));
+            None
+        }
     };
-    // Lua に登録した関数は `config` を持ち続ける。割り当てた Lua 関数は Lua 本体を持つので、
-    // 中身を取り出して Lua → `config` → Lua の循環参照を作らない
-    let mut config = std::mem::take(&mut *config.borrow_mut());
+
+    let plugins = std::mem::take(&mut state.borrow_mut().plugins);
+    let specs = plugins.iter().map(|plugin| plugin.spec.clone()).collect();
+    let mut missing_plugins = Vec::new();
+    let mut color_dirs: Vec<_> = paths
+        .map(|p| p.config_dir.join("colors"))
+        .into_iter()
+        .collect();
+    if let (true, Some(lua_path)) = (load_plugins, &lua_path) {
+        // プラグインも `kugutsu.opt` などに書き込むので、設定を取り出す前に読み込む
+        let plugins_dir = paths.and_then(|paths| paths.plugins_dir.as_deref());
+        let report = loader::load(&lua, &plugins, lua_path, plugins_dir);
+        errors.extend(report.errors);
+        missing_plugins = report.missing;
+        color_dirs.extend(report.color_dirs);
+    }
+    drop(plugins);
+
+    // Lua に登録した関数は `state` を持ち続ける。割り当てた Lua 関数は Lua 本体を持つので、
+    // 中身を取り出して Lua → `state` → Lua の循環参照を作らない
+    let State {
+        mut config, theme, ..
+    } = std::mem::take(&mut *state.borrow_mut());
+    if let (true, Some(name)) = (load_plugins, theme) {
+        // テーマは init.lua とプラグインの後に引くので、setup と opt.theme の順序は問わない
+        match theme::find(&name, &color_dirs) {
+            Ok(theme) => config.theme = theme,
+            Err(err) => errors.push(format!("kugutsu.opt.theme: {err}")),
+        }
+    }
     // prefix は後から変えられるので、prefix と同じキーへの直接の割り当ては最後に確かめる
     if config.keymap.del(&Trigger::Direct(config.prefix.clone())) {
         errors.push(format!(
@@ -105,40 +200,61 @@ pub fn evaluate(source: &str, chunk_name: &str) -> Loaded {
             config.prefix.unparse()
         ));
     }
-    Loaded { config, errors }
+    let loaded = Loaded {
+        config,
+        errors,
+        missing_plugins,
+    };
+    (loaded, specs)
 }
 
-fn run(source: &str, chunk_name: &str, config: &Rc<RefCell<Config>>) -> mlua::Result<()> {
-    let lua = Lua::new();
+/// `kugutsu` グローバルを組み立て、`package.path` を設定する。
+fn prepare(lua: &Lua, state: &SharedState, paths: Option<&Paths>) -> mlua::Result<LuaPath> {
     let queue: ActionQueue = Rc::default();
-    let target = Rc::clone(config);
+    let target = Rc::clone(state);
     let set = lua.create_function(move |_, (key, value): (String, Value)| {
         Ok(set_option(&mut target.borrow_mut(), &key, &value).err())
     })?;
-    let source_config = Rc::clone(config);
+    let source_state = Rc::clone(state);
     let get = lua.create_function(move |lua, key: String| {
-        Ok(match get_option(lua, &source_config.borrow(), &key) {
+        Ok(match get_option(lua, &source_state.borrow(), &key) {
             Ok(value) => (value, None),
             Err(err) => (Value::Nil, Some(err)),
         })
     })?;
-    let target = Rc::clone(config);
+    let target = Rc::clone(state);
     let callback_queue = Rc::clone(&queue);
     let keymap_set = lua.create_function(move |lua, (key, rhs, opts): (Value, Value, Value)| {
         let mapping = parse_mapping(lua, &callback_queue, &key, rhs, &opts);
         Ok(mapping
-            .map(|(trigger, action, desc)| target.borrow_mut().keymap.set(trigger, action, desc))
+            .map(|(trigger, action, desc)| {
+                target.borrow_mut().config.keymap.set(trigger, action, desc)
+            })
             .err())
     })?;
-    let target = Rc::clone(config);
+    let target = Rc::clone(state);
     let keymap_del = lua.create_function(move |_, key: Value| {
-        Ok(delete_mapping(&mut target.borrow_mut(), &key).err())
+        Ok(delete_mapping(&mut target.borrow_mut().config, &key).err())
     })?;
     let action = lua.create_function(move |_, (name, arg): (String, Value)| {
         Ok(push_action(&queue, &name, &arg).err())
     })?;
     let action_names = Command::NAMED.iter().map(|&(name, _)| name);
     let action_names = lua.create_sequence_from(action_names)?;
+    let target = Rc::clone(state);
+    let context = spec::Context {
+        home: paths.and_then(|paths| paths.home.clone()),
+        config_dir: paths.map(|paths| paths.config_dir.clone()),
+    };
+    let plugins_setup = lua.create_function(move |_, value: Value| {
+        Ok(match spec::parse(&value, &context) {
+            Ok(plugins) => {
+                target.borrow_mut().plugins = plugins;
+                None
+            }
+            Err(err) => Some(format!("kugutsu.plugins.setup: {err}")),
+        })
+    })?;
     lua.load(PRELUDE).set_name("=prelude").call::<()>((
         set,
         get,
@@ -146,9 +262,9 @@ fn run(source: &str, chunk_name: &str, config: &Rc<RefCell<Config>>) -> mlua::Re
         keymap_del,
         action,
         action_names,
+        plugins_setup,
     ))?;
-    // `=` で始まる名前はそのままエラー位置に出る（`init.lua:3: ...`）
-    lua.load(source).set_name(format!("={chunk_name}")).exec()
+    LuaPath::install(lua, paths.map(|paths| paths.config_dir.as_path()))
 }
 
 /// `kugutsu.keymap.set(key, rhs, opts)` の引数を検証する。
@@ -259,8 +375,9 @@ fn tab_number(arg: &Value) -> Result<usize, String> {
 }
 
 /// `kugutsu.opt.<key> = value` を検証して設定に書き込む。
-fn set_option(config: &mut Config, key: &str, value: &Value) -> Result<(), String> {
+fn set_option(state: &mut State, key: &str, value: &Value) -> Result<(), String> {
     let invalid = |reason: &str| format!("kugutsu.opt.{key}: {reason}");
+    let config = &mut state.config;
     match key {
         "prefix" => {
             let text = string(key, value)?;
@@ -278,19 +395,16 @@ fn set_option(config: &mut Config, key: &str, value: &Value) -> Result<(), Strin
         "line_height" => config.line_height = positive_number(key, value)?,
         "background_opacity" => config.background_opacity = unit_number(key, value)?,
         "background_blur" => config.background_blur = boolean(key, value)?,
-        "theme" => {
-            let name = string(key, value)?;
-            config.theme = theme::builtin(&name)
-                .ok_or_else(|| invalid(&format!("unknown theme '{name}'")))?
-                .clone();
-        }
+        // 名前だけを覚え、テーマは評価の最後に引く
+        "theme" => state.theme = Some(string(key, value)?),
         _ => return Err(unknown(key)),
     }
     Ok(())
 }
 
 /// `kugutsu.opt.<key>` の現在の値。
-fn get_option(lua: &Lua, config: &Config, key: &str) -> Result<Value, String> {
+fn get_option(lua: &Lua, state: &State, key: &str) -> Result<Value, String> {
+    let config = &state.config;
     let string = |text: &str| {
         lua.create_string(text)
             .map(Value::String)
@@ -301,7 +415,7 @@ fn get_option(lua: &Lua, config: &Config, key: &str) -> Result<Value, String> {
         "font_family" => config.font_family.as_deref().map_or(Ok(Value::Nil), string),
         "font_size" => Ok(Value::Number(config.font_size.into())),
         "line_height" => Ok(Value::Number(config.line_height.into())),
-        "theme" => string(&config.theme.name),
+        "theme" => string(state.theme.as_deref().unwrap_or(&config.theme.name)),
         "background_opacity" => Ok(Value::Number(config.background_opacity.into())),
         "background_blur" => Ok(Value::Boolean(config.background_blur)),
         _ => Err(unknown(key)),
@@ -520,11 +634,21 @@ mod tests {
 
     #[test]
     fn unknown_theme_is_an_error() {
-        let config = eval_err(
-            r#"kugutsu.opt.theme = "nope""#,
-            "kugutsu.opt.theme: unknown theme 'nope'",
+        let loaded = eval(r#"kugutsu.opt.theme = "nope""#);
+        assert_eq!(
+            loaded.errors,
+            vec!["kugutsu.opt.theme: unknown theme 'nope'".to_string()]
         );
-        assert_eq!(config.theme, Theme::default());
+        assert_eq!(loaded.config.theme, Theme::default());
+        // init.lua の評価中は代入した名前が読める
+        let loaded = eval(
+            r#"kugutsu.opt.theme = "nope"
+            assert(kugutsu.opt.theme == "nope")"#,
+        );
+        assert_eq!(
+            loaded.errors,
+            vec!["kugutsu.opt.theme: unknown theme 'nope'".to_string()]
+        );
         eval_err(
             "kugutsu.opt.theme = 1",
             "kugutsu.opt.theme: expected string, got number",
@@ -799,6 +923,65 @@ mod tests {
             );
             assert!(err.contains(shown), "{arg}: {err}");
         }
+    }
+
+    fn spec_names(source: &str) -> (Vec<String>, Vec<String>) {
+        let (specs, errors) = evaluate_spec(source, "init.lua", None);
+        (specs.into_iter().map(|spec| spec.name).collect(), errors)
+    }
+
+    #[test]
+    fn plugins_setup_declares_plugins() {
+        let (names, errors) = spec_names(
+            r#"kugutsu.plugins.setup({ "a/one.kugutsu", { "b/two.kugutsu", rev = "v1" } })"#,
+        );
+        assert_eq!(errors, Vec::<String>::new());
+        assert_eq!(names, ["one.kugutsu", "two.kugutsu"]);
+        assert_eq!(spec_names("").0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn last_plugins_setup_wins() {
+        let (names, _) = spec_names(
+            r#"kugutsu.plugins.setup({ "a/one" })
+            kugutsu.plugins.setup({ "b/two" })"#,
+        );
+        assert_eq!(names, ["two"]);
+    }
+
+    #[test]
+    fn plugins_setup_errors_point_at_the_call() {
+        let (names, errors) = spec_names(
+            r#"kugutsu.plugins.setup({ "a/one" })
+            kugutsu.plugins.setup({ { "a/b", opt = {} } })"#,
+        );
+        assert_eq!(names, ["one"]);
+        assert_eq!(
+            errors,
+            vec!["init.lua:2: kugutsu.plugins.setup: a/b: unknown key 'opt'".to_string()]
+        );
+    }
+
+    #[test]
+    fn require_returns_one_value_and_reports_the_calling_line() {
+        let (names, errors) = spec_names(
+            r#"package.preload["plugins.ui"] = function() return { "a/one" } end
+            kugutsu.plugins.setup({ "b/two", require("plugins.ui") })"#,
+        );
+        assert_eq!(errors, Vec::<String>::new());
+        assert_eq!(names, ["two", "one"]);
+        let loaded = eval("\nrequire('nope')");
+        assert!(
+            loaded.errors[0].starts_with("init.lua:2: module 'nope' not found"),
+            "{:?}",
+            loaded.errors
+        );
+    }
+
+    #[test]
+    fn evaluate_spec_does_not_resolve_the_theme() {
+        let (_, errors) = evaluate_spec(r#"kugutsu.opt.theme = "from-a-plugin""#, "init.lua", None);
+        assert_eq!(errors, Vec::<String>::new());
     }
 
     #[test]

@@ -38,7 +38,7 @@ nix develop --command cargo run --release
 
 If you use [direnv](https://direnv.net/), run `direnv allow` once and you can drop the `nix develop --command` prefix.
 
-Inside the devShell, `KUGUTSU_CONFIG` points to the sample configuration in [`examples/config/kugutsu/init.lua`](examples/config/kugutsu/init.lua), so `cargo run` uses it instead of your own `init.lua`.
+Inside the devShell, `KUGUTSU_CONFIG` points to `examples/config/kugutsu/init.lua`, so `cargo run` reads that file instead of your own `init.lua`. The `examples` directory is ignored by Git: create the file there to try out settings locally. Without it, every option keeps its default.
 
 ## Default Keybind
 

@@ -32,6 +32,12 @@
   5. 必要ならリファクタリングし、再びテストが通ることを確認する
 - gpui のビュー（キー操作・クリック・表示の切り替えなど）も `gpui::TestAppContext` / `VisualTestContext` でテストする。「gpui に依存するからテストできない」として省かないこと
 
+## ブランチと作業ディレクトリ
+
+- 作業は main で直接行わず、必ず git worktree で作業ブランチごとのディレクトリを作って行う
+  - 例: `git worktree add ../kugutsu-<branch> -b <branch>`
+- 作業が終わってマージしたら `git worktree remove` で片付ける
+
 ## コミット規約
 
 - Conventional Commitsに準拠すること

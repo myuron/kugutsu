@@ -7,6 +7,7 @@
 use alacritty_terminal::Term;
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::Line;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
@@ -133,6 +134,24 @@ pub fn cursor_position<T: EventListener>(term: &Term<T>) -> Option<Cursor> {
                 1
             },
         })
+}
+
+/// スクロール位置に関わらない、最下部の画面の各行の文字列（行末の空白は除く）。
+pub fn bottom_screen_lines<T: EventListener>(term: &Term<T>) -> Vec<String> {
+    let grid = term.grid();
+    (0..term.screen_lines())
+        .map(|line| {
+            let mut text = String::new();
+            for cell in grid[Line(line as i32)].into_iter() {
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(cell.c);
+                text.extend(cell.zerowidth().into_iter().flatten());
+            }
+            text.trim_end().to_string()
+        })
+        .collect()
 }
 
 /// セルを行の区間に追加する。半角セルは直前の同一スタイル区間に連結する。
@@ -404,6 +423,33 @@ mod tests {
     fn cursor_position_matches_visible_cursor() {
         let term = term_with(5, 1, "あ\x1b[1G".as_bytes());
         assert_eq!(cursor_position(&term), snapshot(&term).cursor);
+    }
+
+    /// 3 行の画面に 1〜6 を 1 行ずつ出力し、2 行分スクロールバックをさかのぼったもの。
+    fn scrolled_term() -> Term<VoidListener> {
+        let mut term = term_with(3, 3, b"1\r\n2\r\n3\r\n4\r\n5\r\n6");
+        term.scroll_display(alacritty_terminal::grid::Scroll::Delta(2));
+        term
+    }
+
+    #[test]
+    fn snapshot_shows_scrollback_while_scrolled() {
+        let snap = snapshot(&scrolled_term());
+        let rows: Vec<String> = snap.rows.iter().map(|r| r.text()).collect();
+        assert_eq!(rows, ["2  ", "3  ", "4  "]);
+        // カーソルは最下部の画面にあるので見えない
+        assert_eq!(snap.cursor, None);
+    }
+
+    #[test]
+    fn bottom_screen_lines_ignore_scrolling() {
+        assert_eq!(bottom_screen_lines(&scrolled_term()), ["4", "5", "6"]);
+    }
+
+    #[test]
+    fn bottom_screen_lines_skip_wide_char_spacers() {
+        let term = term_with(5, 1, "aあb".as_bytes());
+        assert_eq!(bottom_screen_lines(&term), ["aあb"]);
     }
 
     #[test]

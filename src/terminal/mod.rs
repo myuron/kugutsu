@@ -161,6 +161,7 @@ impl Terminal {
     }
 
     /// 最下部から何行さかのぼって表示しているか。
+    #[cfg(test)]
     pub fn display_offset(&self) -> usize {
         self.term.lock().grid().display_offset()
     }
@@ -187,6 +188,11 @@ impl Terminal {
     /// DECCKM（アプリケーションカーソルキーモード）が有効か。
     pub fn app_cursor(&self) -> bool {
         self.term.lock().mode().contains(TermMode::APP_CURSOR)
+    }
+
+    /// alternate screen（less や vim の全画面表示）を使っているか。
+    pub fn alt_screen(&self) -> bool {
+        self.term.lock().mode().contains(TermMode::ALT_SCREEN)
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -330,6 +336,14 @@ mod tests {
         let (terminal, mut events) = Terminal::spawn(sh("printf '\\033[?1h'"), SIZE).unwrap();
         run_until_exit(&terminal, &mut events);
         assert!(terminal.app_cursor());
+    }
+
+    #[test]
+    fn tracks_alt_screen() {
+        let (terminal, mut events) = Terminal::spawn(sh("printf '\\033[?1049h'"), SIZE).unwrap();
+        assert!(!terminal.alt_screen());
+        run_until_exit(&terminal, &mut events);
+        assert!(terminal.alt_screen());
     }
 
     #[test]

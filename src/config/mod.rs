@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 
 use gpui::{Keystroke, Rgba, WindowBackgroundAppearance, rgb};
 
-use crate::tabs::prefix::DEFAULT_PREFIX;
+use crate::tabs::prefix::{DEFAULT_PREFIX, Keymap};
 use crate::theme::Theme;
 
-pub use lua::evaluate;
+pub use lua::{LuaCallback, evaluate};
 pub(crate) use lua::{error_message, lua_type_name};
 
 /// 設定ファイルの名前（エラー表示にも使う）。
@@ -30,6 +30,8 @@ pub struct Config {
     pub font_size: f32,
     /// フォントサイズに対する行の高さの比。
     pub line_height: f32,
+    /// キーの割り当て。
+    pub keymap: Keymap,
     /// カラーテーマ。
     pub theme: Theme,
     /// 背景の不透明度（0.0〜1.0）。ターミナルの既定の背景と UI のバーに掛ける。
@@ -66,6 +68,7 @@ impl Default for Config {
             font_family: None,
             font_size: 14.0,
             line_height: 1.3,
+            keymap: Keymap::default(),
             theme: Theme::default(),
             background_opacity: 1.0,
             background_blur: false,

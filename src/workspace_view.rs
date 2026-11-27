@@ -53,7 +53,7 @@ const BAR_BUTTON_SIZE: f32 = 24.0;
 const PANE_GAP: f32 = 6.0;
 const PANE_RADIUS: f32 = 8.0;
 const PANE_PADDING: f32 = 6.0;
-const STATUS_LINE_HEIGHT: f32 = 22.0;
+const STATUS_LINE_HEIGHT: f32 = 26.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
 /// Agent の状態を調べる間隔。
 const AGENT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -871,32 +871,95 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// 画面下部のステータスライン。prefix 入力待ちのときはその旨を表示する。
-    fn render_status_line(&self) -> impl IntoElement {
+    /// ステータスラインに出す、今いる workspace・タブ・ペインの場所。
+    fn status_location(&self, cx: &App) -> Option<String> {
+        let tab = self.active_tab()?;
+        let title = tab.active_view().and_then(|view| view.read(cx).title());
+        let tab_index = self.active_tabs()?.active_index();
+        let active = tab.panes.active_id();
+        let pane_number = tab.panes.iter().position(|(id, _)| id == active)? + 1;
+        Some(status_location(
+            self.workspaces.active_index(),
+            &tab_label(tab_index, title),
+            pane_number,
+            tab.panes.iter().count(),
+        ))
+    }
+
+    /// 画面下部のステータスライン。左から prefix キー、今いる場所、状態ごとの Agent の数、
+    /// 設定のエラーを並べる。prefix 入力待ちのときは prefix キーを強調する。
+    fn render_status_line(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let ui = &self.config.theme.ui;
+        let armed = self.keymap.is_armed();
+        let counts = AgentCounts::of(&self.agent_groups(cx));
+        let agents = status_agents(counts).into_iter().map(|(state, count)| {
+            let color = state_color(ui, state);
+            div()
+                .debug_selector(move || format!("status-agents-{}", state.label()))
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(4.0))
+                .ml(px(12.0))
+                .text_color(rgb(if state == AgentState::Working {
+                    ui.foreground
+                } else {
+                    color
+                }))
+                .child(icon(state_icon(state), 12.0).text_color(rgb(color)))
+                .child(format!("{count} {}", state.label()))
+        });
+        let prefix = div()
+            .debug_selector(|| "status-prefix".into())
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(5.0))
+            .h(px(STATUS_LINE_HEIGHT - 6.0))
+            .px(px(7.0))
+            .rounded(px(4.0))
+            .border_1()
+            .map(|chip| {
+                if armed {
+                    chip.bg(rgb(ui.raised_background))
+                        .border_color(rgb(ui.prefix_indicator))
+                        .text_color(rgb(ui.prefix_indicator))
+                } else {
+                    chip.border_color(rgb(ui.strong_border))
+                        .text_color(rgb(ui.inactive_foreground))
+                }
+            })
+            .child(icon(Icon::Keyboard, 12.0))
+            .child(self.prefix_label());
         div()
             .debug_selector(|| "status-line".into())
             .flex()
             .flex_none()
             .items_center()
             .h(px(STATUS_LINE_HEIGHT))
-            .px(px(12.0))
-            .text_size(px(12.0))
-            .bg(self.config.translucent(self.config.theme.ui.bar_background))
+            .px(px(8.0))
+            .text_size(px(TEXT_SM))
+            .bg(self.config.translucent(ui.bar_background))
             .border_t_1()
-            .border_color(rgb(self.config.theme.ui.bar_border))
-            .when(self.keymap.is_armed(), |line| {
-                line.child(
-                    div()
-                        .text_color(rgb(self.config.theme.ui.prefix_indicator))
-                        .child(self.prefix_label()),
-                )
-            })
-            // 右寄せの表示をまとめる（どちらか片方だけでも右端に寄るように）
-            .child(div().flex_1())
+            .border_color(rgb(ui.bar_border))
+            .child(prefix)
+            // 場所の表示が残りの幅を取り、Agent の数とエラーを右端に寄せる
+            .child(
+                div()
+                    .debug_selector(|| "status-location".into())
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .ml(px(12.0))
+                    .truncate()
+                    .text_color(rgb(ui.inactive_foreground))
+                    .children(self.status_location(cx)),
+            )
+            .children(agents)
             .children(self.missing_plugins_message().map(|message| {
                 div()
                     .debug_selector(|| "plugins-missing".into())
                     .flex_none()
+                    .ml(px(12.0))
                     .text_color(rgb(self.config.theme.ui.error))
                     .child(message)
             }))
@@ -1171,7 +1234,7 @@ impl Render for WorkspaceView {
                             ),
                     ),
             )
-            .child(self.render_status_line())
+            .child(self.render_status_line(cx))
             .when(self.keymap.is_armed(), |root| {
                 root.child(self.render_which_key())
             })
@@ -1454,6 +1517,32 @@ fn workspace_label(index: usize) -> String {
 /// `pane_number` はタブの中で左上から数えた 1 始まりの番号。
 fn agent_location(tab_index: usize, title: Option<&str>, pane_number: usize) -> String {
     format!("{} · pane {pane_number}", tab_label(tab_index, title))
+}
+
+/// ステータスラインに出す場所（`Workspace 1 › 1: kugutsu › pane 1/3`）。
+fn status_location(
+    workspace_index: usize,
+    tab_label: &str,
+    pane_number: usize,
+    pane_count: usize,
+) -> String {
+    format!(
+        "{} › {tab_label} › pane {pane_number}/{pane_count}",
+        workspace_label(workspace_index)
+    )
+}
+
+/// ステータスラインに出す Agent の数。1 つ以上いる状態だけを working・blocked・done の順に
+/// 並べる（idle は目を向ける必要が無いので出さない）。
+fn status_agents(counts: AgentCounts) -> Vec<(AgentState, usize)> {
+    [
+        (AgentState::Working, counts.working),
+        (AgentState::Blocked, counts.blocked),
+        (AgentState::Done, counts.done),
+    ]
+    .into_iter()
+    .filter(|&(_, count)| count > 0)
+    .collect()
 }
 
 /// サイドバーの Agent の 1 行。
@@ -2163,6 +2252,53 @@ mod tests {
             workspace.read_with(cx, |w, cx| w.sidebar_counts(&w.agent_groups(cx)));
         assert_eq!(blocked, None);
         assert_eq!(total, "0 total");
+    }
+
+    #[test]
+    fn status_location_names_workspace_tab_and_pane() {
+        assert_eq!(
+            status_location(0, "1: kugutsu", 1, 3),
+            "Workspace 1 › 1: kugutsu › pane 1/3"
+        );
+    }
+
+    #[test]
+    fn status_agents_skip_empty_states_and_idle() {
+        let counts = AgentCounts {
+            working: 2,
+            blocked: 0,
+            done: 1,
+            idle: 4,
+        };
+        assert_eq!(
+            status_agents(counts),
+            vec![(AgentState::Working, 2), (AgentState::Done, 1)]
+        );
+    }
+
+    #[gpui::test]
+    fn status_line_shows_prefix_location_and_agents(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_agents(cx);
+        assert_eq!(
+            workspace.read_with(cx, |w, cx| w.status_location(cx)),
+            Some("Workspace 1 › 1: shell › pane 2/2".to_string())
+        );
+        let line = bounds(cx, "status-line");
+        let order = [
+            "status-prefix",
+            "status-location",
+            "status-agents-working",
+            "status-agents-blocked",
+            "status-agents-done",
+        ];
+        let parts: Vec<_> = order.iter().map(|selector| bounds(cx, selector)).collect();
+        assert!(parts.iter().all(|part| line.contains(&part.center())));
+        assert!(
+            parts
+                .windows(2)
+                .all(|pair| pair[0].right() <= pair[1].left()),
+            "{parts:?}"
+        );
     }
 
     #[gpui::test]

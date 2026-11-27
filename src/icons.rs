@@ -50,6 +50,7 @@ icons! {
     Plus => "plus",
     ChevronLeft => "chevron-left",
     ChevronRight => "chevron-right",
+    Keyboard => "keyboard",
 }
 
 /// Agent の状態を表すアイコン。色だけでなく形でも区別できるようにする。

@@ -426,7 +426,7 @@ mod tests {
     fn theme_source(background: &str) -> String {
         let dark = include_str!("../../runtime/colors/kugutsu-dark.lua");
         dark.replacen(
-            r##"background = "#1e1e1e""##,
+            r##"background = "#0a0a0b""##,
             &format!(r##"background = "{background}""##),
             1,
         )
@@ -461,7 +461,7 @@ mod tests {
         assert_eq!(background("second"), 0x000003);
         // プラグインのテーマは同梱テーマより優先する
         assert_eq!(background("kugutsu-light"), 0x000004);
-        assert_eq!(background("kugutsu-dark"), 0x1e1e1e);
+        assert_eq!(background("kugutsu-dark"), 0x0a0a0b);
     }
 
     #[test]

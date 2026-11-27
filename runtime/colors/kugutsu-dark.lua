@@ -1,23 +1,28 @@
--- Kugutsu の既定のダークテーマ。
+-- Kugutsu の既定のダークテーマ。無彩色を基調にし、色は Agent の状態だけに使う。
 return {
   terminal = {
-    foreground = "#d4d4d4",
-    background = "#1e1e1e",
-    cursor = "#aeafad",
+    foreground = "#c9c9c9",
+    background = "#0a0a0b",
+    cursor = "#b5b5b5",
     ansi = {
-      "#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
-      "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff",
+      "#1a1b1d", "#c26a6a", "#7aa886", "#d1a257", "#7f9ab8", "#a58bb5", "#7fa8a8", "#c9c9c9",
+      "#5a5a5a", "#d68282", "#8fbf9b", "#e0b874", "#98b0cc", "#bba2c9", "#96bfbf", "#ececec",
     },
   },
   ui = {
-    bar_background = "#181818",
-    bar_border = "#2b2b2b",
-    inactive_foreground = "#8a8a8a",
-    active_pane_border = "#569cd6",
-    prefix_indicator = "#dcdcaa",
-    agent_working = "#569cd6",
-    agent_blocked = "#e5c07b",
-    agent_done = "#89d185",
-    error = "#f14c4c",
+    bar_background = "#060606",
+    bar_border = "#1a1b1d",
+    inactive_foreground = "#808080",
+    active_pane_border = "#b5b5b5",
+    prefix_indicator = "#ececec",
+    agent_working = "#b5b5b5",
+    agent_blocked = "#d1a257",
+    agent_done = "#7aa886",
+    error = "#c26a6a",
+    foreground = "#c9c9c9",
+    accent = "#b5b5b5",
+    raised_background = "#111213",
+    overlay_background = "#18191b",
+    strong_border = "#222326",
   },
 }

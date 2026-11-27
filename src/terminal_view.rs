@@ -869,6 +869,22 @@ mod tests {
         }
     }
 
+    mod keyboard {
+        use super::ime::{open_script, wait_for_screen};
+        use gpui::TestAppContext;
+
+        #[gpui::test]
+        fn shift_enter_reaches_the_program_as_escape_return(cx: &mut TestAppContext) {
+            // 届いた 2 バイトを 8 進で表示する（ESC CR なら 033 015）
+            let script = "stty raw -echo; printf ready; \
+                reply=$(dd bs=1 count=2 2>/dev/null | od -An -to1 | tr -s ' \\n' ' '); \
+                printf 'got:%s|' \"$reply\"; sleep 30";
+            let (view, cx) = open_script(cx, script);
+            cx.simulate_keystrokes("shift-enter");
+            wait_for_screen(&view, cx, "got: 033 015 |");
+        }
+    }
+
     mod ime {
         use super::*;
         use crate::terminal::{SpawnOptions, Terminal};

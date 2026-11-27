@@ -17,6 +17,13 @@ pub fn keystroke_to_bytes(keystroke: &Keystroke, app_cursor: bool) -> Option<Vec
         return Some(sequence);
     }
 
+    // Shift+Enter は Enter（CR）と区別できるよう ESC CR を送る。Claude Code はこれを
+    // 改行の挿入として扱う（/terminal-setup が Alacritty や Zed に設定するのと同じ値）。
+    // ESC を前置するので Alt の有無は問わない
+    if key == "enter" && modifiers.shift {
+        return Some(b"\x1b\r".to_vec());
+    }
+
     let bytes = match key {
         "enter" => vec![b'\r'],
         "tab" if modifiers.shift => b"\x1b[Z".to_vec(),
@@ -255,6 +262,14 @@ mod tests {
         assert_eq!(bytes("ctrl-backspace"), Some(vec![0x08]));
         assert_eq!(bytes("ctrl-enter"), Some(b"\r".to_vec()));
         assert_eq!(bytes("ctrl-tab"), Some(b"\t".to_vec()));
+    }
+
+    #[test]
+    fn shift_enter_sends_escape_return_for_newline() {
+        // Claude Code などは ESC CR を「改行を挿入」として扱う（Enter の CR は送信）
+        assert_eq!(bytes("shift-enter"), Some(b"\x1b\r".to_vec()));
+        assert_eq!(bytes("alt-enter"), Some(b"\x1b\r".to_vec()));
+        assert_eq!(bytes("shift-alt-enter"), Some(b"\x1b\r".to_vec()));
     }
 
     #[test]

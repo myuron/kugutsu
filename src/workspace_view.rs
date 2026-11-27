@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::agents::AgentState;
 use crate::panes::{Axis, Node, PaneId, Panes};
 use crate::tabs::Tabs;
-use crate::tabs::prefix::{Command, KeyOutcome, PREFIX, PrefixKeymap, bindings};
+use crate::tabs::prefix::{Command, DEFAULT_PREFIX, KeyOutcome, PrefixKeymap, bindings};
 use crate::terminal::size::GridSize;
 use crate::terminal::{SpawnOptions, Terminal, colors};
 use crate::terminal_view::{TerminalView, TerminalViewEvent};
@@ -619,7 +619,11 @@ impl WorkspaceView {
             .border_t_1()
             .border_color(rgb(BAR_BORDER))
             .when(self.keymap.is_armed(), |line| {
-                line.child(div().text_color(rgb(PREFIX_INDICATOR)).child(PREFIX))
+                line.child(
+                    div()
+                        .text_color(rgb(PREFIX_INDICATOR))
+                        .child(DEFAULT_PREFIX),
+                )
             })
     }
 
@@ -678,7 +682,7 @@ impl WorkspaceView {
                         .w(px(KEYMAP_KEY_COLUMN_WIDTH))
                         .flex_none()
                         .text_color(rgb(PREFIX_INDICATOR))
-                        .child(format!("{PREFIX} {key}")),
+                        .child(format!("{DEFAULT_PREFIX} {key}")),
                 )
                 .child(
                     div()

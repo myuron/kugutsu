@@ -8,7 +8,7 @@ use gpui::Keystroke;
 use crate::panes::{Axis, Direction};
 
 /// prefix キー（gpui のキーストローク表記）。
-pub const PREFIX: &str = "ctrl-b";
+pub const DEFAULT_PREFIX: &str = "ctrl-b";
 
 /// タブ・ペインに対する操作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,7 +147,7 @@ fn command_for(keystroke: &Keystroke) -> Option<Command> {
 }
 
 fn is_prefix(keystroke: &Keystroke) -> bool {
-    matches(keystroke, PREFIX)
+    matches(keystroke, DEFAULT_PREFIX)
 }
 
 /// `keystroke` が gpui 表記の `expected` と同じキー・修飾キーか。
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn prefix_arms_and_is_consumed() {
         let mut keymap = PrefixKeymap::default();
-        assert_eq!(press(&mut keymap, PREFIX), KeyOutcome::Consumed);
+        assert_eq!(press(&mut keymap, DEFAULT_PREFIX), KeyOutcome::Consumed);
         assert!(keymap.is_armed());
     }
 
@@ -203,7 +203,7 @@ mod tests {
         ];
         for (key, command) in cases {
             let mut keymap = PrefixKeymap::default();
-            press(&mut keymap, PREFIX);
+            press(&mut keymap, DEFAULT_PREFIX);
             assert_eq!(
                 press(&mut keymap, key),
                 KeyOutcome::Command(command),
@@ -216,15 +216,15 @@ mod tests {
     #[test]
     fn double_prefix_forwards_prefix() {
         let mut keymap = PrefixKeymap::default();
-        press(&mut keymap, PREFIX);
-        assert_eq!(press(&mut keymap, PREFIX), KeyOutcome::Forward);
+        press(&mut keymap, DEFAULT_PREFIX);
+        assert_eq!(press(&mut keymap, DEFAULT_PREFIX), KeyOutcome::Forward);
         assert!(!keymap.is_armed());
     }
 
     #[test]
     fn unknown_key_after_prefix_is_discarded() {
         let mut keymap = PrefixKeymap::default();
-        press(&mut keymap, PREFIX);
+        press(&mut keymap, DEFAULT_PREFIX);
         assert_eq!(press(&mut keymap, "z"), KeyOutcome::Consumed);
         assert!(!keymap.is_armed());
         assert_eq!(press(&mut keymap, "c"), KeyOutcome::Forward);
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn escape_cancels_prefix() {
         let mut keymap = PrefixKeymap::default();
-        press(&mut keymap, PREFIX);
+        press(&mut keymap, DEFAULT_PREFIX);
         assert_eq!(press(&mut keymap, "escape"), KeyOutcome::Consumed);
         assert!(!keymap.is_armed());
     }
@@ -242,7 +242,7 @@ mod tests {
     fn listed_bindings_trigger_their_commands() {
         for &(key, command) in KEYS {
             let mut keymap = PrefixKeymap::default();
-            press(&mut keymap, PREFIX);
+            press(&mut keymap, DEFAULT_PREFIX);
             assert_eq!(
                 press(&mut keymap, key),
                 KeyOutcome::Command(command),
@@ -258,7 +258,7 @@ mod tests {
         assert!(bindings.contains(&("?", "Show key bindings")));
         assert!(bindings.contains(&("1-9", "Select tab N")));
         for (key, description) in &bindings {
-            assert!(!key.contains(PREFIX), "{key}");
+            assert!(!key.contains(DEFAULT_PREFIX), "{key}");
             assert!(!description.is_empty(), "{key}");
         }
     }
@@ -267,7 +267,7 @@ mod tests {
     fn modified_keys_are_not_commands() {
         for key in ["ctrl-c", "alt-n", "shift-x", "0"] {
             let mut keymap = PrefixKeymap::default();
-            press(&mut keymap, PREFIX);
+            press(&mut keymap, DEFAULT_PREFIX);
             assert_eq!(press(&mut keymap, key), KeyOutcome::Consumed, "{key}");
         }
     }

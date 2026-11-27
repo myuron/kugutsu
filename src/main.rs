@@ -1,4 +1,5 @@
 mod agents;
+mod config;
 mod font;
 mod panes;
 mod tabs;

@@ -18,20 +18,25 @@ use crate::theme;
 /// `kugutsu` グローバルを組み立てる Lua コード。`set` / `get` などは Rust の関数で、
 /// 不正な値ならエラーメッセージを返す。`error(..., 2)` で呼び出した行をエラー位置にする。
 const PRELUDE: &str = r#"
-local set, get, keymap_set, keymap_del, action, action_names, plugins_setup = ...
+local set, get, ui_set, ui_get, keymap_set, keymap_del, action, action_names, plugins_setup = ...
 local function check(err)
     if err then error(err, 3) end
 end
-local opt = setmetatable({}, {
-    __newindex = function(_, key, value)
-        check(set(key, value))
-    end,
-    __index = function(_, key)
-        local value, err = get(key)
-        check(err)
-        return value
-    end,
-})
+-- 代入と参照を Rust の関数で検証する table（`kugutsu.opt` / `kugutsu.ui`）
+local function options(set, get)
+    return setmetatable({}, {
+        __newindex = function(_, key, value)
+            check(set(key, value))
+        end,
+        __index = function(_, key)
+            local value, err = get(key)
+            check(err)
+            return value
+        end,
+    })
+end
+local opt = options(set, get)
+local ui = options(ui_set, ui_get)
 local keymap = {
     set = function(key, rhs, opts)
         check(keymap_set(key, rhs, opts))
@@ -54,7 +59,7 @@ local plugins = {
         check(plugins_setup(spec))
     end,
 }
-kugutsu = { opt = opt, keymap = keymap, action = actions, plugins = plugins }
+kugutsu = { opt = opt, ui = ui, keymap = keymap, action = actions, plugins = plugins }
 -- Lua 5.4 の require はローダーのデータ（ファイルのパス）も返すので、
 -- `setup({ "a/b", require("plugins.ui") })` のように table の最後に書いても値が 1 つになるようにする
 local lua_require = require
@@ -211,17 +216,8 @@ fn evaluate_in(
 /// `kugutsu` グローバルを組み立て、`package.path` を設定する。
 fn prepare(lua: &Lua, state: &SharedState, paths: Option<&Paths>) -> mlua::Result<LuaPath> {
     let queue: ActionQueue = Rc::default();
-    let target = Rc::clone(state);
-    let set = lua.create_function(move |_, (key, value): (String, Value)| {
-        Ok(set_option(&mut target.borrow_mut(), &key, &value).err())
-    })?;
-    let source_state = Rc::clone(state);
-    let get = lua.create_function(move |lua, key: String| {
-        Ok(match get_option(lua, &source_state.borrow(), &key) {
-            Ok(value) => (value, None),
-            Err(err) => (Value::Nil, Some(err)),
-        })
-    })?;
+    let (set, get) = option_functions(lua, state, set_option, get_option)?;
+    let (ui_set, ui_get) = option_functions(lua, state, set_ui_option, get_ui_option)?;
     let target = Rc::clone(state);
     let callback_queue = Rc::clone(&queue);
     let keymap_set = lua.create_function(move |lua, (key, rhs, opts): (Value, Value, Value)| {
@@ -258,6 +254,8 @@ fn prepare(lua: &Lua, state: &SharedState, paths: Option<&Paths>) -> mlua::Resul
     lua.load(PRELUDE).set_name("=prelude").call::<()>((
         set,
         get,
+        ui_set,
+        ui_get,
         keymap_set,
         keymap_del,
         action,
@@ -265,6 +263,31 @@ fn prepare(lua: &Lua, state: &SharedState, paths: Option<&Paths>) -> mlua::Resul
         plugins_setup,
     ))?;
     LuaPath::install(lua, paths.map(|paths| paths.config_dir.as_path()))
+}
+
+type SetOption = fn(&mut State, &str, &Value) -> Result<(), String>;
+type GetOption = fn(&Lua, &State, &str) -> Result<Value, String>;
+
+/// 設定の table（`kugutsu.opt` など）の代入・参照を検証する Lua 関数の組。
+/// どちらも不正なら最後の戻り値にエラーメッセージを返す。
+fn option_functions(
+    lua: &Lua,
+    state: &SharedState,
+    set: SetOption,
+    get: GetOption,
+) -> mlua::Result<(Function, Function)> {
+    let target = Rc::clone(state);
+    let setter = lua.create_function(move |_, (key, value): (String, Value)| {
+        Ok(set(&mut target.borrow_mut(), &key, &value).err())
+    })?;
+    let source = Rc::clone(state);
+    let getter = lua.create_function(move |lua, key: String| {
+        Ok(match get(lua, &source.borrow(), &key) {
+            Ok(value) => (value, None),
+            Err(err) => (Value::Nil, Some(err)),
+        })
+    })?;
+    Ok((setter, getter))
 }
 
 /// `kugutsu.keymap.set(key, rhs, opts)` の引数を検証する。
@@ -376,27 +399,24 @@ fn tab_number(arg: &Value) -> Result<usize, String> {
 
 /// `kugutsu.opt.<key> = value` を検証して設定に書き込む。
 fn set_option(state: &mut State, key: &str, value: &Value) -> Result<(), String> {
-    let invalid = |reason: &str| format!("kugutsu.opt.{key}: {reason}");
+    let path = &format!("kugutsu.opt.{key}");
+    let invalid = |reason: &str| format!("{path}: {reason}");
     let config = &mut state.config;
     match key {
         "prefix" => {
-            let text = string(key, value)?;
+            let text = string(path, value)?;
             config.prefix = parse_keystroke(&text)
                 .ok_or_else(|| invalid(&format!("invalid keystroke {text:?}")))?;
         }
-        "font_family" => {
-            let text = string(key, value)?;
-            if text.trim().is_empty() {
-                return Err(invalid("must not be empty"));
-            }
-            config.font_family = Some(text);
-        }
-        "font_size" => config.font_size = positive_number(key, value)?,
-        "line_height" => config.line_height = positive_number(key, value)?,
-        "background_opacity" => config.background_opacity = unit_number(key, value)?,
-        "background_blur" => config.background_blur = boolean(key, value)?,
+        "font_family" => config.font_family = Some(font_name(path, value)?),
+        "ui_font_family" => config.ui_font_family = Some(font_name(path, value)?),
+        "inactive_pane_opacity" => config.inactive_pane_opacity = unit_number(path, value)?,
+        "font_size" => config.font_size = positive_number(path, value)?,
+        "line_height" => config.line_height = positive_number(path, value)?,
+        "background_opacity" => config.background_opacity = unit_number(path, value)?,
+        "background_blur" => config.background_blur = boolean(path, value)?,
         // 名前だけを覚え、テーマは評価の最後に引く
-        "theme" => state.theme = Some(string(key, value)?),
+        "theme" => state.theme = Some(string(path, value)?),
         _ => return Err(unknown(key)),
     }
     Ok(())
@@ -413,6 +433,11 @@ fn get_option(lua: &Lua, state: &State, key: &str) -> Result<Value, String> {
     match key {
         "prefix" => string(&config.prefix.unparse()),
         "font_family" => config.font_family.as_deref().map_or(Ok(Value::Nil), string),
+        "ui_font_family" => config
+            .ui_font_family
+            .as_deref()
+            .map_or(Ok(Value::Nil), string),
+        "inactive_pane_opacity" => Ok(Value::Number(config.inactive_pane_opacity.into())),
         "font_size" => Ok(Value::Number(config.font_size.into())),
         "line_height" => Ok(Value::Number(config.line_height.into())),
         "theme" => string(state.theme.as_deref().unwrap_or(&config.theme.name)),
@@ -422,15 +447,36 @@ fn get_option(lua: &Lua, state: &State, key: &str) -> Result<Value, String> {
     }
 }
 
+/// `kugutsu.ui.<key> = value` を検証して設定に書き込む。
+fn set_ui_option(state: &mut State, key: &str, value: &Value) -> Result<(), String> {
+    let path = &format!("kugutsu.ui.{key}");
+    let ui = &mut state.config.ui;
+    match key {
+        "item_width" => ui.item_width = positive_number(path, value)?,
+        _ => return Err(unknown_ui(key)),
+    }
+    Ok(())
+}
+
+/// `kugutsu.ui.<key>` の現在の値。
+fn get_ui_option(_lua: &Lua, state: &State, key: &str) -> Result<Value, String> {
+    let ui = &state.config.ui;
+    match key {
+        "item_width" => Ok(Value::Number(ui.item_width.into())),
+        _ => Err(unknown_ui(key)),
+    }
+}
+
 fn unknown(key: &str) -> String {
     format!("unknown option '{key}'")
 }
 
-fn type_error(key: &str, expected: &str, value: &Value) -> String {
-    format!(
-        "kugutsu.opt.{key}: expected {expected}, got {}",
-        lua_type_name(value)
-    )
+fn unknown_ui(key: &str) -> String {
+    format!("unknown ui option '{key}'")
+}
+
+fn type_error(path: &str, expected: &str, value: &Value) -> String {
+    format!("{path}: expected {expected}, got {}", lua_type_name(value))
 }
 
 /// Lua の `type()` と同じ型名（mlua は整数を `integer` と呼ぶが、Lua では `number`）。
@@ -441,49 +487,56 @@ pub(crate) fn lua_type_name(value: &Value) -> &'static str {
     }
 }
 
-fn string(key: &str, value: &Value) -> Result<String, String> {
+fn string(path: &str, value: &Value) -> Result<String, String> {
     match value {
         Value::String(text) => Ok(text.to_string_lossy()),
-        _ => Err(type_error(key, "string", value)),
+        _ => Err(type_error(path, "string", value)),
     }
 }
 
-fn boolean(key: &str, value: &Value) -> Result<bool, String> {
+/// 空白だけではないフォント名。
+fn font_name(path: &str, value: &Value) -> Result<String, String> {
+    let text = string(path, value)?;
+    if text.trim().is_empty() {
+        return Err(format!("{path}: must not be empty"));
+    }
+    Ok(text)
+}
+
+fn boolean(path: &str, value: &Value) -> Result<bool, String> {
     match value {
         Value::Boolean(flag) => Ok(*flag),
-        _ => Err(type_error(key, "boolean", value)),
+        _ => Err(type_error(path, "boolean", value)),
     }
 }
 
 /// 0 以上 1 以下の数値。
-fn unit_number(key: &str, value: &Value) -> Result<f32, String> {
-    let number = number(key, value)?;
+fn unit_number(path: &str, value: &Value) -> Result<f32, String> {
+    let number = number(path, value)?;
     if (0.0..=1.0).contains(&number) {
         Ok(number as f32)
     } else {
         Err(format!(
-            "kugutsu.opt.{key}: expected a number between 0 and 1, got {number}"
+            "{path}: expected a number between 0 and 1, got {number}"
         ))
     }
 }
 
-fn number(key: &str, value: &Value) -> Result<f64, String> {
+fn number(path: &str, value: &Value) -> Result<f64, String> {
     match *value {
         Value::Integer(n) => Ok(n as f64),
         Value::Number(n) => Ok(n),
-        _ => Err(type_error(key, "number", value)),
+        _ => Err(type_error(path, "number", value)),
     }
 }
 
 /// 有限で 0 より大きい数値。
-fn positive_number(key: &str, value: &Value) -> Result<f32, String> {
-    let number = number(key, value)?;
+fn positive_number(path: &str, value: &Value) -> Result<f32, String> {
+    let number = number(path, value)?;
     if number.is_finite() && number > 0.0 {
         Ok(number as f32)
     } else {
-        Err(format!(
-            "kugutsu.opt.{key}: expected a positive number, got {number}"
-        ))
+        Err(format!("{path}: expected a positive number, got {number}"))
     }
 }
 
@@ -510,6 +563,7 @@ pub(crate) fn error_message(err: &mlua::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::UiConfig;
     use crate::tabs::prefix::{Action, Binding, Keymap, Trigger};
     use crate::theme::Theme;
     use gpui::Keystroke;
@@ -672,6 +726,53 @@ mod tests {
         eval_ok(
             "assert(kugutsu.opt.background_opacity == 1)\nassert(kugutsu.opt.background_blur == false)",
         );
+    }
+
+    #[test]
+    fn sets_ui_font_and_inactive_pane_opacity() {
+        let config = eval_ok(
+            r#"kugutsu.opt.ui_font_family = "Inter"
+            kugutsu.opt.inactive_pane_opacity = 0.6"#,
+        );
+        assert_eq!(config.ui_font_family.as_deref(), Some("Inter"));
+        assert_eq!(config.inactive_pane_opacity, 0.6);
+        eval_ok(
+            r#"assert(kugutsu.opt.ui_font_family == nil)
+            assert(math.abs(kugutsu.opt.inactive_pane_opacity - 0.85) < 1e-6)"#,
+        );
+        eval_err(
+            r#"kugutsu.opt.ui_font_family = " ""#,
+            "kugutsu.opt.ui_font_family: must not be empty",
+        );
+        eval_err(
+            "kugutsu.opt.inactive_pane_opacity = 2",
+            "kugutsu.opt.inactive_pane_opacity: expected a number between 0 and 1",
+        );
+    }
+
+    #[test]
+    fn sets_ui_item_width() {
+        let config = eval_ok("kugutsu.ui.item_width = 200");
+        assert_eq!(config.ui.item_width, 200.0);
+        eval_ok("assert(kugutsu.ui.item_width == 150)");
+        eval_ok(
+            "kugutsu.ui.item_width = kugutsu.ui.item_width + 10\nassert(kugutsu.ui.item_width == 160)",
+        );
+    }
+
+    #[test]
+    fn invalid_ui_options_are_errors() {
+        let config = eval_err(
+            "kugutsu.ui.item_width = 0",
+            "kugutsu.ui.item_width: expected a positive number, got 0",
+        );
+        assert_eq!(config.ui, UiConfig::default());
+        eval_err(
+            "kugutsu.ui.item_width = 'wide'",
+            "kugutsu.ui.item_width: expected number, got string",
+        );
+        eval_err("kugutsu.ui.foo = 1", "unknown ui option 'foo'");
+        eval_err("local x = kugutsu.ui.foo", "unknown ui option 'foo'");
     }
 
     #[test]

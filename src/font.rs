@@ -1,4 +1,4 @@
-//! ターミナル用の等幅フォント選択。
+//! フォント選択（ターミナルの等幅フォントと UI のフォント）。
 
 /// 優先順に並べた等幅フォントファミリー。
 const PREFERRED_MONOSPACE: &[&str] = &[
@@ -41,6 +41,36 @@ pub fn resolve_family(configured: Option<&str>, available: &[String]) -> Option<
         eprintln!("warning: font_family {name:?} is not installed; using a fallback font");
     }
     choose_monospace_family(available)
+}
+
+/// UI に使う、優先順に並べたプロポーショナルフォント。
+const PREFERRED_UI: &[&str] = &[
+    "Inter",
+    "Inter Variable",
+    "IBM Plex Sans",
+    "Noto Sans",
+    "Cantarell",
+    "Ubuntu",
+    "DejaVu Sans",
+    "Liberation Sans",
+    "Helvetica Neue",
+    "Segoe UI",
+];
+
+/// UI（バー・サイドバーなど）に使うフォント。設定された `configured` がインストールされて
+/// いればそれを、無ければ優先リストから選ぶ。どれも無ければ `None`（gpui の既定）。
+pub fn resolve_ui_family(configured: Option<&str>, available: &[String]) -> Option<String> {
+    let installed = |name: &str| available.iter().any(|a| a == name);
+    if let Some(name) = configured {
+        if installed(name) {
+            return Some(name.to_string());
+        }
+        eprintln!("warning: ui_font_family {name:?} is not installed; using a fallback font");
+    }
+    PREFERRED_UI
+        .iter()
+        .find(|name| installed(name))
+        .map(|name| name.to_string())
 }
 
 #[cfg(test)]
@@ -106,6 +136,38 @@ mod tests {
     fn resolve_chooses_monospace_without_configuration() {
         let available = names(&["Noto Sans", "Hack"]);
         assert_eq!(resolve_family(None, &available).as_deref(), Some("Hack"));
+    }
+
+    #[test]
+    fn ui_font_prefers_proportional_fonts() {
+        let available = names(&["DejaVu Sans Mono", "DejaVu Sans", "Inter"]);
+        assert_eq!(
+            resolve_ui_family(None, &available).as_deref(),
+            Some("Inter")
+        );
+        let available = names(&["DejaVu Sans Mono", "DejaVu Sans"]);
+        assert_eq!(
+            resolve_ui_family(None, &available).as_deref(),
+            Some("DejaVu Sans")
+        );
+    }
+
+    #[test]
+    fn ui_font_uses_configured_font_when_installed() {
+        let available = names(&["Inter", "Fira Code"]);
+        assert_eq!(
+            resolve_ui_family(Some("Fira Code"), &available).as_deref(),
+            Some("Fira Code")
+        );
+        assert_eq!(
+            resolve_ui_family(Some("Missing"), &available).as_deref(),
+            Some("Inter")
+        );
+    }
+
+    #[test]
+    fn ui_font_is_none_without_known_fonts() {
+        assert_eq!(resolve_ui_family(None, &names(&["Some Mono"])), None);
     }
 
     #[test]

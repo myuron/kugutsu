@@ -97,6 +97,8 @@ pub struct WorkspaceView {
     config_errors: Vec<String>,
     /// spec にあるが、まだインストールされていないプラグインの名前。
     missing_plugins: Vec<String>,
+    /// UI に使うフォント。`None` なら gpui の既定。
+    ui_font: Option<SharedString>,
     _agent_poll: Task<()>,
 }
 
@@ -117,12 +119,18 @@ impl WorkspaceView {
             missing_plugins,
         } = config;
         let first = Self::create_pane(terminal, events, &config, window, cx);
+        let ui_font = crate::font::resolve_ui_family(
+            config.ui_font_family.as_deref(),
+            &window.text_system().all_font_names(),
+        )
+        .map(SharedString::from);
         let this = Self {
             workspaces: Tabs::new(Workspace::new(first)),
             keymap: PrefixKeymap::new(config.prefix.clone(), config.keymap.clone()),
             config,
             config_errors,
             missing_plugins,
+            ui_font,
             spawn_options,
             sidebar_visible: true,
             keymap_help_visible: false,
@@ -890,6 +898,9 @@ impl Render for WorkspaceView {
         div()
             .relative()
             .size_full()
+            .when_some(self.ui_font.clone(), |root, family| {
+                root.font_family(family)
+            })
             .flex()
             .flex_col()
             .capture_key_down(cx.listener(Self::on_key_down))
@@ -1151,6 +1162,22 @@ mod tests {
         cx.simulate_keystrokes("ctrl-a");
         cx.run_until_parked();
         assert!(cx.debug_bounds("which-key").is_some());
+    }
+
+    #[gpui::test]
+    fn ui_font_follows_the_config(cx: &mut TestAppContext) {
+        let (workspace, cx) =
+            open_workspace_with_init_lua(cx, r#"kugutsu.opt.ui_font_family = "Some Sans""#);
+        let expected = cx.update(|window, _| {
+            crate::font::resolve_ui_family(
+                Some("Some Sans"),
+                &window.text_system().all_font_names(),
+            )
+        });
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.ui_font.clone()),
+            expected.map(SharedString::from)
+        );
     }
 
     #[gpui::test]

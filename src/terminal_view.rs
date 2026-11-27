@@ -21,7 +21,8 @@ use crate::font;
 use crate::terminal::content::{Cursor, Snapshot, Style};
 use crate::terminal::scroll::{self, Wheel, WheelAccumulator, WheelMode};
 use crate::terminal::size::GridSize;
-use crate::terminal::{Scroll, Terminal, TerminalEvent, colors, keys};
+use crate::terminal::{Scroll, Terminal, TerminalEvent, keys};
+use crate::theme::TerminalColors;
 
 const PADDING: f32 = 4.0;
 const CURSOR_OPACITY: f32 = 0.6;
@@ -41,6 +42,8 @@ pub struct TerminalView {
     terminal: Terminal,
     focus_handle: FocusHandle,
     metrics: CellMetrics,
+    /// テーマのターミナル配色。
+    colors: TerminalColors,
     title: Option<String>,
     /// IME で変換中の文字列（preedit）。PTY には確定するまで送らない。
     marked_text: Option<String>,
@@ -121,6 +124,7 @@ impl TerminalView {
             terminal,
             focus_handle,
             metrics: CellMetrics::measure(window, config),
+            colors: config.theme.terminal.clone(),
             title: None,
             marked_text: None,
             agent: None,
@@ -132,6 +136,12 @@ impl TerminalView {
     }
 
     /// プログラムが OSC で設定したタイトル。
+    /// テーマのターミナル配色。
+    #[cfg(test)]
+    pub fn colors(&self) -> &TerminalColors {
+        &self.colors
+    }
+
     pub fn title(&self) -> Option<&str> {
         self.title.as_deref()
     }
@@ -163,7 +173,9 @@ impl TerminalView {
     ) -> Task<()> {
         cx.spawn_in(window, async move |this, cx| {
             while let Some(event) = events.next().await {
-                let Ok(event) = this.update(cx, |view, _| view.terminal.handle_event(event)) else {
+                let Ok(event) = this.update(cx, |view, _| {
+                    view.terminal.handle_event(event, &view.colors)
+                }) else {
                     break;
                 };
                 let Some(event) = event else { continue };
@@ -381,7 +393,8 @@ impl Focusable for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let snapshot = self.terminal.snapshot();
+        let snapshot = self.terminal.snapshot(&self.colors);
+        let colors = self.colors.clone();
         let current_size = self.terminal.size();
         let entity = cx.entity();
         let view = entity.downgrade();
@@ -404,7 +417,7 @@ impl Render for TerminalView {
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .size_full()
             .p(px(PADDING))
-            .bg(rgb(colors::DEFAULT_BACKGROUND))
+            .bg(rgb(self.colors.background))
             .child(
                 canvas(
                     // 要素自身の大きさからグリッドサイズを決める。変わっていれば PTY をリサイズし、
@@ -417,7 +430,7 @@ impl Render for TerminalView {
                         }
                         view.update(cx, |view, _| {
                             view.terminal.resize(size);
-                            view.terminal.snapshot()
+                            view.terminal.snapshot(&view.colors)
                         })
                         .unwrap_or(snapshot)
                     },
@@ -432,6 +445,7 @@ impl Render for TerminalView {
                             &snapshot,
                             preedit.as_ref(),
                             &paint_metrics,
+                            &colors,
                             bounds,
                             window,
                             cx,
@@ -482,6 +496,7 @@ fn paint_snapshot(
     snapshot: &Snapshot,
     preedit: Option<&Preedit>,
     metrics: &CellMetrics,
+    colors: &TerminalColors,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
@@ -497,7 +512,7 @@ fn paint_snapshot(
     for (row_index, row) in snapshot.rows.iter().enumerate() {
         for segment in &row.segments {
             let origin = cell_origin(row_index, segment.col);
-            if segment.style.bg != colors::DEFAULT_BACKGROUND {
+            if segment.style.bg != colors.background {
                 let area =
                     Bounds::new(origin, size(cell_width * segment.cells as f32, cell_height));
                 window.paint_quad(fill(area, rgb(segment.style.bg)));
@@ -519,18 +534,18 @@ fn paint_snapshot(
     }
 
     if let Some(preedit) = preedit {
-        paint_preedit(preedit, metrics, bounds, window, cx);
+        paint_preedit(preedit, metrics, colors, bounds, window, cx);
     } else if let Some(cursor) = snapshot.cursor {
         let area = Bounds::new(
             cell_origin(cursor.row, cursor.col),
             size(cell_width * cursor.cells as f32, cell_height),
         );
-        paint_cursor(area, window);
+        paint_cursor(area, colors, window);
     }
 }
 
-fn paint_cursor(area: Bounds<Pixels>, window: &mut Window) {
-    let mut color: Hsla = rgb(colors::CURSOR).into();
+fn paint_cursor(area: Bounds<Pixels>, colors: &TerminalColors, window: &mut Window) {
+    let mut color: Hsla = rgb(colors.cursor).into();
     color.a = CURSOR_OPACITY;
     window.paint_quad(fill(area, color));
 }
@@ -545,6 +560,7 @@ struct Preedit {
 fn paint_preedit(
     preedit: &Preedit,
     metrics: &CellMetrics,
+    colors: &TerminalColors,
     bounds: Bounds<Pixels>,
     window: &mut Window,
     cx: &mut App,
@@ -553,7 +569,7 @@ fn paint_preedit(
     let line = window.text_system().shape_line(
         preedit.text.clone().into(),
         metrics.font_size,
-        &[preedit_run(preedit.text.len(), &metrics.font)],
+        &[preedit_run(preedit.text.len(), &metrics.font, colors)],
         None,
     );
     let anchor = cursor_cell_bounds(
@@ -566,9 +582,9 @@ fn paint_preedit(
     let (text_origin, cursor) = preedit_layout(anchor, line.width, metrics, bounds);
     window.with_content_mask(Some(ContentMask { bounds }), |window| {
         let area = Bounds::new(text_origin, size(line.width, metrics.cell_height));
-        window.paint_quad(fill(area, rgb(colors::DEFAULT_BACKGROUND)));
+        window.paint_quad(fill(area, rgb(colors.background)));
         let _ = line.paint(text_origin, metrics.cell_height, window, cx);
-        paint_cursor(cursor, window);
+        paint_cursor(cursor, colors, window);
     });
 }
 
@@ -596,12 +612,11 @@ fn preedit_layout(
 }
 
 /// IME の変換中文字列のスタイル（既定の前景色に下線）。
-fn preedit_run(len: usize, base_font: &Font) -> TextRun {
+fn preedit_run(len: usize, base_font: &Font, colors: &TerminalColors) -> TextRun {
     text_run(
         &Style {
-            fg: colors::DEFAULT_FOREGROUND,
             underline: true,
-            ..Style::default()
+            ..Style::plain(colors)
         },
         len,
         base_font,
@@ -648,12 +663,17 @@ fn text_run(style: &Style, len: usize, base_font: &Font) -> TextRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::{self, Theme};
+
+    fn plain() -> Style {
+        Style::plain(&Theme::default().terminal)
+    }
 
     #[test]
     fn text_run_uses_foreground_and_length() {
         let style = Style {
             fg: 0x112233,
-            ..Style::default()
+            ..plain()
         };
         let run = text_run(&style, 5, &font("Mono"));
         assert_eq!(run.len, 5);
@@ -671,7 +691,7 @@ mod tests {
             italic: true,
             underline: true,
             strikethrough: true,
-            ..Style::default()
+            ..plain()
         };
         let run = text_run(&style, 1, &font("Mono"));
         assert_eq!(run.font.family.as_ref(), "Mono");
@@ -683,7 +703,7 @@ mod tests {
 
     #[test]
     fn blank_segments() {
-        let plain = Style::default();
+        let plain = plain();
         assert!(is_blank("   ", &plain));
         assert!(!is_blank(" a ", &plain));
         let underlined = Style {
@@ -695,10 +715,11 @@ mod tests {
 
     #[test]
     fn preedit_run_is_underlined() {
-        let run = preedit_run(6, &font("Mono"));
+        let light = &theme::builtin("kugutsu-light").unwrap().terminal;
+        let run = preedit_run(6, &font("Mono"), light);
         assert_eq!(run.len, 6);
         assert_eq!(run.font.family.as_ref(), "Mono");
-        assert_eq!(run.color, rgb(colors::DEFAULT_FOREGROUND).into());
+        assert_eq!(run.color, rgb(light.foreground).into());
         assert!(run.underline.is_some());
     }
 
@@ -812,6 +833,23 @@ mod tests {
                 assert_eq!(view.metrics.font_size, px(20.0));
                 assert_eq!(view.metrics.cell_height, px(30.0));
             });
+        }
+
+        #[gpui::test]
+        fn uses_terminal_colors_of_the_theme(cx: &mut TestAppContext) {
+            let options = SpawnOptions {
+                program: Some(("sleep".into(), vec!["30".into()])),
+            };
+            let (terminal, events) = Terminal::spawn(options, INITIAL_SIZE).unwrap();
+            let light = crate::theme::builtin("kugutsu-light").unwrap().clone();
+            let config = Config {
+                theme: light.clone(),
+                ..Config::default()
+            };
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                TerminalView::new(terminal, events, &config, window, cx)
+            });
+            view.read_with(cx, |view, _| assert_eq!(view.colors, light.terminal));
         }
     }
 

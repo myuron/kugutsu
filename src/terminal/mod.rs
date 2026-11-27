@@ -29,6 +29,8 @@ use process::ProcessInfo;
 use scroll::WheelMode;
 use size::GridSize;
 
+use crate::theme::TerminalColors;
+
 /// 起動するプログラム。`None` なら `$SHELL`（未設定なら passwd に登録されたシェル）。
 #[derive(Debug, Clone, Default)]
 pub struct SpawnOptions {
@@ -112,7 +114,7 @@ impl Terminal {
 
     /// alacritty からのイベントを処理する。PTY への応答が必要なもの（端末への問い合わせ）は
     /// ここで書き戻し、ビューが反応すべきものだけを返す。
-    pub fn handle_event(&self, event: Event) -> Option<TerminalEvent> {
+    pub fn handle_event(&self, event: Event, theme: &TerminalColors) -> Option<TerminalEvent> {
         match event {
             Event::Wakeup => Some(TerminalEvent::Wakeup),
             Event::Title(title) => Some(TerminalEvent::Title(title)),
@@ -124,7 +126,7 @@ impl Terminal {
             }
             // fish などは起動時に色を問い合わせ、応答を待つので必ず返す
             Event::ColorRequest(index, format) => {
-                let rgb = colors::index_to_rgb(index, self.term.lock().colors());
+                let rgb = colors::index_to_rgb(index, self.term.lock().colors(), theme);
                 if let Some(rgb) = rgb {
                     self.reply(format(rgb).into_bytes());
                 }
@@ -195,8 +197,8 @@ impl Terminal {
         self.term.lock().mode().contains(TermMode::ALT_SCREEN)
     }
 
-    pub fn snapshot(&self) -> Snapshot {
-        content::snapshot(&self.term.lock())
+    pub fn snapshot(&self, colors: &TerminalColors) -> Snapshot {
+        content::snapshot(&self.term.lock(), colors)
     }
 
     /// 表示・非表示に関わらないカーソル位置（IME の変換中文字列を置く場所）。画面全体を走査しない。
@@ -224,6 +226,7 @@ impl Drop for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::{self, Theme};
     use futures::channel::mpsc::TryRecvError;
     use std::time::{Duration, Instant};
 
@@ -254,15 +257,27 @@ mod tests {
         }
     }
 
-    /// ビューと同じように `handle_event` でイベントを処理し、`Exit` まで進める。
+    fn dark() -> TerminalColors {
+        Theme::default().terminal
+    }
+
     fn run_until_exit(
         terminal: &Terminal,
         events: &mut UnboundedReceiver<Event>,
     ) -> Vec<TerminalEvent> {
+        run_until_exit_with(terminal, events, &dark())
+    }
+
+    /// ビューと同じように `handle_event` でイベントを処理し、`Exit` まで進める。
+    fn run_until_exit_with(
+        terminal: &Terminal,
+        events: &mut UnboundedReceiver<Event>,
+        colors: &TerminalColors,
+    ) -> Vec<TerminalEvent> {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut handled = Vec::new();
         loop {
-            if let Some(event) = terminal.handle_event(next_event(events, deadline)) {
+            if let Some(event) = terminal.handle_event(next_event(events, deadline), colors) {
                 let exit = event == TerminalEvent::Exit;
                 handled.push(event);
                 if exit {
@@ -273,14 +288,23 @@ mod tests {
     }
 
     fn screen_text(terminal: &Terminal) -> String {
-        terminal.snapshot().rows.iter().map(|r| r.text()).collect()
+        terminal
+            .snapshot(&dark())
+            .rows
+            .iter()
+            .map(|r| r.text())
+            .collect()
     }
 
     #[test]
     fn renders_program_output() {
         let (terminal, mut events) = Terminal::spawn(sh("printf hello"), SIZE).unwrap();
         run_until_exit(&terminal, &mut events);
-        assert!(terminal.snapshot().rows[0].text().starts_with("hello"));
+        assert!(
+            terminal.snapshot(&dark()).rows[0]
+                .text()
+                .starts_with("hello")
+        );
     }
 
     #[test]
@@ -305,7 +329,7 @@ mod tests {
         assert_eq!(terminal.size(), bigger);
         terminal.write(b"\r".as_slice());
         run_until_exit(&terminal, &mut events);
-        assert_eq!(terminal.snapshot().rows.len(), 7);
+        assert_eq!(terminal.snapshot(&dark()).rows.len(), 7);
         let text = screen_text(&terminal);
         assert!(text.contains("7 50"), "{text:?}");
     }
@@ -328,6 +352,24 @@ mod tests {
         let (terminal, mut events) = Terminal::spawn(sh(script), SIZE).unwrap();
         run_until_exit(&terminal, &mut events);
         let text = screen_text(&terminal);
+        assert!(text.contains("got:]11;rgb:ffff/ffff/ffff"), "{text:?}");
+    }
+
+    #[test]
+    fn answers_color_queries_with_theme_colors() {
+        let script = "stty raw -echo; \
+            printf '\\033]11;?\\007'; \
+            reply=$(dd bs=1 count=24 2>/dev/null); \
+            printf 'got:%s' \"$reply\" | tr -d '\\033\\007'";
+        let light = theme::builtin("kugutsu-light").unwrap().terminal.clone();
+        let (terminal, mut events) = Terminal::spawn(sh(script), SIZE).unwrap();
+        run_until_exit_with(&terminal, &mut events, &light);
+        let text: String = terminal
+            .snapshot(&light)
+            .rows
+            .iter()
+            .map(|r| r.text())
+            .collect();
         assert!(text.contains("got:]11;rgb:ffff/ffff/ffff"), "{text:?}");
     }
 
@@ -396,7 +438,7 @@ mod tests {
     fn answering_queries_keeps_scroll_position() {
         let terminal = terminal_with_scrollback();
         terminal.scroll(Scroll::Delta(3));
-        terminal.handle_event(Event::PtyWrite("\x1b[0n".into()));
+        terminal.handle_event(Event::PtyWrite("\x1b[0n".into()), &dark());
         assert_eq!(terminal.display_offset(), 3);
     }
 
@@ -439,8 +481,11 @@ mod tests {
             Terminal::spawn(sh("trap '' HUP; echo ready; sleep 8"), SIZE).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         // trap が設定されるまで待つ
-        while !terminal.snapshot().rows[0].text().starts_with("ready") {
-            terminal.handle_event(next_event(&mut events, deadline));
+        while !terminal.snapshot(&dark()).rows[0]
+            .text()
+            .starts_with("ready")
+        {
+            terminal.handle_event(next_event(&mut events, deadline), &dark());
         }
         drop(terminal);
         while !matches!(next_event(&mut events, deadline), Event::Exit) {}

@@ -208,6 +208,7 @@ mod tests {
                 font_family: Some("Fira Code".into()),
                 font_size: 16.5,
                 line_height: 1.5,
+                ..Config::default()
             }
         );
     }

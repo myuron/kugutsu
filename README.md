@@ -93,4 +93,14 @@ kugutsu.opt.line_height = 1.3
 | `font_size`   | number | `14`       | Terminal font size in pixels |
 | `line_height` | number | `1.3`      | Line height as a multiple of the font size |
 
-Errors in `init.lua` — syntax errors, runtime errors, unknown options or values of the wrong type — are shown on the right of the status line, and Kugutsu keeps running. Options set before the error still apply; the rest keep their defaults.
+The following are errors:
+
+- Syntax errors and runtime errors in `init.lua`
+- Options other than the ones above (e.g. `kugutsu.opt.foo = 1`)
+- Values of the wrong type (e.g. `kugutsu.opt.font_size = "big"`)
+- A `prefix` that is not a valid keystroke, or an empty `font_family`
+- A `font_size` or `line_height` that is zero, negative, NaN or infinite
+
+Errors are shown on the right of the status line with the line number in `init.lua`, and Kugutsu keeps running. Options set before the error still apply; the rest keep their defaults.
+
+Colors and themes are not configurable yet.

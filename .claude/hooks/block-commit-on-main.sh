@@ -19,7 +19,20 @@ if grep -Eq "$new_branch" <<<"$command"; then
   exit 0
 fi
 
-branch=$(git -C "${cwd:-.}" branch --show-current 2>/dev/null || true)
+# commit するリポジトリ。`git -C <dir>` があればそのディレクトリ、無ければコマンド中の
+# 最後の `cd <dir>`、どちらも無ければセッションの cwd。git worktree で作業ブランチの
+# ディレクトリへ移って commit する場合も、そのディレクトリのブランチで判定する
+last_arg() {
+  grep -oE "$1[[:space:]]+[^;&|()[:space:]]+" <<<"$command" | tail -n 1 |
+    sed -E "s/^$1[[:space:]]+//; s/^[\"']//; s/[\"']$//" || true
+}
+target=$(last_arg 'git[[:space:]]+-C')
+if [[ -z "$target" ]]; then
+  target=$(last_arg '(^|[;&|(`[:space:]])cd')
+fi
+target=${target/#\~/$HOME}
+
+branch=$(cd "${cwd:-.}" && git -C "${target:-.}" branch --show-current 2>/dev/null || true)
 if [[ "$branch" == "main" ]]; then
   echo "main ブランチ上での git commit は禁止されています。先に 'git switch -c <branch>' で作業ブランチを切ってから commit してください。" >&2
   exit 2

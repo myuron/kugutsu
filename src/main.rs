@@ -11,6 +11,8 @@ mod terminal_view;
 mod theme;
 mod workspace_view;
 
+use std::rc::Rc;
+
 use clap::Parser;
 use gpui::{App, Application, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
 
@@ -38,7 +40,9 @@ fn main() {
     // TERM / COLORTERM を設定する（内部で set_var を呼ぶため、スレッド生成前に一度だけ呼ぶ）
     alacritty_terminal::tty::setup_env();
 
-    let config = paths.map(|paths| config::load(&paths)).unwrap_or_default();
+    let load_config: workspace_view::ConfigLoader =
+        Rc::new(move || paths.as_ref().map(config::load).unwrap_or_default());
+    let config = load_config();
 
     let (terminal, events) = match Terminal::spawn(SpawnOptions::default(), INITIAL_SIZE) {
         Ok(spawned) => spawned,
@@ -64,6 +68,7 @@ fn main() {
                         events,
                         SpawnOptions::default(),
                         config,
+                        load_config,
                         window,
                         cx,
                     )

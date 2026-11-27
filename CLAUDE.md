@@ -20,6 +20,9 @@
   - `nix develop --command cargo clippy --all-targets --locked -- -D warnings`
   - `nix develop --command cargo test --all-targets --locked`
   - `nix flake check`（treefmt を含む）と `nix build`（サンドボックス内でテストも実行する）
+- Claude Code の hooks（`.claude/settings.json`）で次のチェックが自動で走る
+  - ファイルを編集すると、`.rs` は rustfmt、`.nix` は `nix fmt` で整形される
+  - 作業を終えるとき、Rust 関係の変更があれば clippy と test が走る。失敗したら直してから終える
 - `python3` は入っていない。ファイル編集にスクリプトを使わず、エディタのツールを使う
 
 ## 作業について
@@ -31,6 +34,12 @@
   4. テストを実行し、通ることを確認する
   5. 必要ならリファクタリングし、再びテストが通ることを確認する
 - gpui のビュー（キー操作・クリック・表示の切り替えなど）も `gpui::TestAppContext` / `VisualTestContext` でテストする。「gpui に依存するからテストできない」として省かないこと
+
+## ブランチと作業ディレクトリ
+
+- 作業は main で直接行わず、必ず git worktree で作業ブランチごとのディレクトリを作って行う
+  - 例: `git worktree add ../kugutsu-<branch> -b <branch>`
+- 作業が終わってマージしたら `git worktree remove` で片付ける
 
 ## コミット規約
 

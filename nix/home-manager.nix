@@ -60,7 +60,7 @@ in
         [
           (pkgs.fetchFromGitHub {
             name = "catppuccin.kugutsu";
-            owner = "catppuccin";
+            owner = "myuron";
             repo = "catppuccin.kugutsu";
             rev = "v1.0.0";
             hash = "...";

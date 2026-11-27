@@ -323,7 +323,7 @@ Like Nix flakes, **only explicit commands change plugins or the lockfile**. Star
 
 ```lua
 kugutsu.plugins.setup({
-  "catppuccin/catppuccin.kugutsu",                       -- GitHub shorthand
+  "myuron/catppuccin.kugutsu",                           -- GitHub shorthand
   { "folke/tokyonight.kugutsu", rev = "v1.0.0" },        -- tag, branch or commit
   { url = "https://git.example.com/me/foo.kugutsu.git" },
   { "bob/theme.kugutsu", name = "bob-theme.kugutsu" },   -- custom name
@@ -361,7 +361,7 @@ The spec is plain Lua, so it can be split into modules. Nested lists are flatten
 kugutsu.plugins.setup({
   require("plugins.ui"),
   require("plugins.agents"),
-  "catppuccin/catppuccin.kugutsu",
+  "myuron/catppuccin.kugutsu",
 })
 
 -- ~/.config/kugutsu/lua/plugins/agents.lua
@@ -414,7 +414,7 @@ The lockfile is TOML, sorted by name:
 version = 1
 
 [plugins."catppuccin.kugutsu"]
-url = "https://github.com/catppuccin/catppuccin.kugutsu.git"
+url = "https://github.com/myuron/catppuccin.kugutsu.git"
 rev = "v1.0.0"
 commit = "def4567890abcdef1234567890abcdef12345678"
 ```
@@ -458,7 +458,7 @@ inputs.kugutsu.url = "github:myuron/kugutsu";
     plugins = [
       (pkgs.fetchFromGitHub {
         name = "catppuccin.kugutsu"; # the plugin name in the spec
-        owner = "catppuccin";
+        owner = "myuron";
         repo = "catppuccin.kugutsu";
         rev = "v1.0.0";
         hash = "sha256-...";
@@ -466,7 +466,7 @@ inputs.kugutsu.url = "github:myuron/kugutsu";
       { name = "notes.kugutsu"; src = ./notes; }
     ];
     initLua = ''
-      kugutsu.plugins.setup({ "catppuccin/catppuccin.kugutsu", "me/notes.kugutsu" })
+      kugutsu.plugins.setup({ "myuron/catppuccin.kugutsu", "me/notes.kugutsu" })
     '';
   };
 }

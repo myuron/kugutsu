@@ -2,7 +2,7 @@
 //!
 //! ```lua
 //! kugutsu.plugins.setup({
-//!   "catppuccin/catppuccin.kugutsu",                 -- GitHub の短縮形
+//!   "myuron/catppuccin.kugutsu",                     -- GitHub の短縮形
 //!   { "folke/tokyonight.kugutsu", rev = "v1.0.0" },  -- tag / branch / commit
 //!   { url = "https://git.example.com/me/foo.kugutsu.git" },
 //!   { dir = "~/src/my-plugin.kugutsu" },             -- 開発中のローカルプラグイン

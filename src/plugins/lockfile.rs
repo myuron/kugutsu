@@ -4,7 +4,7 @@
 //! version = 1
 //!
 //! [plugins."catppuccin.kugutsu"]
-//! url = "https://github.com/catppuccin/catppuccin.kugutsu.git"
+//! url = "https://github.com/myuron/catppuccin.kugutsu.git"
 //! rev = "v1.0.0"
 //! commit = "def4567890abcdef1234567890abcdef12345678"
 //! ```

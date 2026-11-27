@@ -206,7 +206,8 @@ fn entry(table: &Table, context: &Context) -> Result<PluginSpec, String> {
 
     let (default_name, source) = match (shorthand, url, dir) {
         (Some(shorthand), None, None) => {
-            let url = github_url(&shorthand).map_err(error)?;
+            // エラーに shorthand そのものが入るので、名前は付けない
+            let url = github_url(&shorthand)?;
             (url_name(&url), Source::Git { url, rev })
         }
         (None, Some(url), None) => (url_name(&url), Source::Git { url, rev }),

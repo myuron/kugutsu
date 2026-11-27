@@ -43,10 +43,12 @@ const TEXT_LG: f32 = 13.0;
 /// working のアイコンが 1 回転する時間と、blocked のアイコンが点滅する周期。
 const SPINNER_PERIOD: Duration = Duration::from_millis(1200);
 const PULSE_PERIOD: Duration = Duration::from_millis(1600);
-/// workspace ライン・タブバーの各項目の幅（両者で揃える）。
-const BAR_ITEM_WIDTH: f32 = 140.0;
-/// バー右端の `<` `>` ボタンの幅。
-const SCROLL_BUTTON_WIDTH: f32 = 24.0;
+/// workspace ライン・タブバーの左右の余白と、項目の間隔・角丸。
+const BAR_PADDING: f32 = 8.0;
+const BAR_ITEM_GAP: f32 = 4.0;
+const BAR_ITEM_RADIUS: f32 = 6.0;
+/// バーの項目とボタンの高さ（ボタンは正方形）。
+const BAR_BUTTON_SIZE: f32 = 24.0;
 const STATUS_LINE_HEIGHT: f32 = 22.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
 /// Agent の状態を調べる間隔。
@@ -510,21 +512,33 @@ impl WorkspaceView {
     /// タブバーの上に置く workspace の一覧。クリックでその workspace へ切り替える。
     fn render_workspace_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active_index = self.workspaces.active_index();
-        let items = (0..self.workspaces.iter().count())
-            .map(|index| {
-                bar_item(index == active_index, workspace_label(index), &self.config)
+        let groups = self.agent_groups(cx);
+        let items =
+            groups
+                .iter()
+                .map(|group| {
+                    let index = group.index;
+                    let dots = agent_dots(group.agents.iter());
+                    bar_item(
+                        &format!("workspace-{index}"),
+                        index == active_index,
+                        Icon::Workspace,
+                        workspace_label(index),
+                        &dots,
+                        &self.config,
+                    )
                     .id(("workspace", index))
-                    .debug_selector(|| format!("workspace-{index}"))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.select_workspace(index, window, cx)
                     }))
-            })
-            .collect();
+                })
+                .collect();
         scrollable_bar(
             "workspace",
             WORKSPACE_BAR_HEIGHT,
             &self.workspace_scroll,
             items,
+            Command::NewWorkspace,
             &self.config,
             cx,
         )
@@ -532,17 +546,29 @@ impl WorkspaceView {
 
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut items = Vec::new();
+        let groups = self.agent_groups(cx);
+        let agents = groups
+            .iter()
+            .find(|group| group.active)
+            .map_or(&[][..], |group| &group.agents[..]);
         if let Some(tabs) = self.active_tabs() {
             let active_index = tabs.active_index();
             for (index, tab) in tabs.iter().enumerate() {
                 let title = tab.active_view().and_then(|view| view.read(cx).title());
+                let dots = agent_dots(agents.iter().filter(|agent| agent.tab_index == index));
                 items.push(
-                    bar_item(index == active_index, tab_label(index, title), &self.config)
-                        .id(("tab", index))
-                        .debug_selector(|| format!("tab-{index}"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.run(Command::SelectTab(index), window, cx)
-                        })),
+                    bar_item(
+                        &format!("tab-{index}"),
+                        index == active_index,
+                        Icon::Terminal,
+                        tab_label(index, title),
+                        &dots,
+                        &self.config,
+                    )
+                    .id(("tab", index))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run(Command::SelectTab(index), window, cx)
+                    })),
                 );
             }
         }
@@ -551,6 +577,7 @@ impl WorkspaceView {
             TAB_BAR_HEIGHT,
             &self.tab_scroll,
             items,
+            Command::NewTab,
             &self.config,
             cx,
         )
@@ -1125,23 +1152,29 @@ impl Render for WorkspaceView {
 }
 
 /// workspace ライン・タブバー。項目は横スクロールし、右端の `<` `>` で 1 項目分ずつ動かす。
-/// `name` はデバッグ用セレクタ（`{name}-bar`, `{name}-scroll-left` など）の接頭辞。
+/// 項目の後ろの `+` で `new_command` を実行する。
+/// `name` はデバッグ用セレクタ（`{name}-bar`, `{name}-scroll-left`, `{name}-new` など）の接頭辞。
 fn scrollable_bar(
     name: &'static str,
     height: f32,
     scroll: &ScrollHandle,
     items: Vec<Stateful<gpui::Div>>,
+    new_command: Command,
     config: &Config,
     cx: &mut Context<WorkspaceView>,
 ) -> gpui::Div {
+    let ui = &config.theme.ui;
+    let step = bar_item_step(config);
     div()
         .flex()
         .flex_none()
+        .items_center()
         .h(px(height))
-        .text_size(px(12.0))
-        .bg(config.translucent(config.theme.ui.bar_background))
+        .px(px(BAR_PADDING))
+        .text_size(px(TEXT_MD))
+        .bg(config.translucent(ui.bar_background))
         .border_b_1()
-        .border_color(rgb(config.theme.ui.bar_border))
+        .border_color(rgb(ui.bar_border))
         .child(
             div()
                 .id(SharedString::from(format!("{name}-bar")))
@@ -1149,60 +1182,79 @@ fn scrollable_bar(
                 .flex()
                 .flex_1()
                 .min_w(px(0.0))
+                .items_center()
+                .gap(px(BAR_ITEM_GAP))
                 .overflow_x_scroll()
                 .track_scroll(scroll)
-                .children(items),
+                .children(items)
+                .child(bar_button(name, "new", Icon::Plus, ui).on_click(
+                    cx.listener(move |this, _, window, cx| this.run(new_command, window, cx)),
+                )),
         )
         .child(scroll_button(
             name,
             "left",
-            "<",
-            BAR_ITEM_WIDTH,
+            Icon::ChevronLeft,
+            step,
             scroll,
-            &config.theme,
+            ui,
             cx,
         ))
         .child(scroll_button(
             name,
             "right",
-            ">",
-            -BAR_ITEM_WIDTH,
+            Icon::ChevronRight,
+            -step,
             scroll,
-            &config.theme,
+            ui,
             cx,
         ))
+}
+
+/// バーの小さなアイコンのボタン（`{name}-{action}`）。
+fn bar_button(
+    name: &'static str,
+    action: &'static str,
+    glyph: Icon,
+    ui: &UiColors,
+) -> Stateful<gpui::Div> {
+    let hover_color = rgb(ui.foreground);
+    let hover_background = rgb(ui.raised_background);
+    div()
+        .id(SharedString::from(format!("{name}-{action}")))
+        .debug_selector(move || format!("{name}-{action}"))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(BAR_BUTTON_SIZE))
+        .rounded(px(BAR_ITEM_RADIUS))
+        .text_color(rgb(ui.inactive_foreground))
+        .cursor_pointer()
+        .hover(move |button| button.text_color(hover_color).bg(hover_background))
+        .child(icon(glyph, 12.0))
 }
 
 /// バーを `delta` だけ横にスクロールするボタン（正の値で左端側へ戻る）。
 fn scroll_button(
     name: &'static str,
     side: &'static str,
-    label: &'static str,
+    glyph: Icon,
     delta: f32,
     scroll: &ScrollHandle,
-    theme: &Theme,
+    ui: &UiColors,
     cx: &mut Context<WorkspaceView>,
 ) -> impl IntoElement {
-    let hover_color = rgb(theme.terminal.foreground);
     let scroll = scroll.clone();
-    div()
-        .id(SharedString::from(format!("{name}-scroll-{side}")))
-        .debug_selector(move || format!("{name}-scroll-{side}"))
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .w(px(SCROLL_BUTTON_WIDTH))
-        .border_l_1()
-        .border_color(rgb(theme.ui.bar_border))
-        .text_color(rgb(theme.ui.inactive_foreground))
-        .cursor_pointer()
-        .hover(move |button| button.text_color(hover_color))
-        .child(label)
-        .on_click(cx.listener(move |_, _, _, cx| {
-            scroll_by(&scroll, delta);
-            cx.notify();
-        }))
+    let action = if side == "left" {
+        "scroll-left"
+    } else {
+        "scroll-right"
+    };
+    bar_button(name, action, glyph, ui).on_click(cx.listener(move |_, _, _, cx| {
+        scroll_by(&scroll, delta);
+        cx.notify();
+    }))
 }
 
 /// 横スクロール位置を `delta` だけ動かす（スクロールできる範囲に収める）。
@@ -1213,28 +1265,77 @@ fn scroll_by(scroll: &ScrollHandle, delta: f32) {
     scroll.set_offset(point(x, offset.y));
 }
 
-/// workspace ライン・タブバーの 1 項目。アクティブなものは背景を本文と揃えて強調する。
-/// 上下の段で区切りが揃うよう幅は固定し、収まらないラベルは省略する。
-fn bar_item(active: bool, label: String, config: &Config) -> gpui::Div {
-    let theme = &config.theme;
+/// バーの項目の幅と間隔を足した、スクロールボタンで 1 項目分動かす量。
+fn bar_item_step(config: &Config) -> f32 {
+    config.ui.item_width + BAR_ITEM_GAP
+}
+
+/// 項目に並べる Agent の状態のドット。注意が必要な順に、状態ごとに 1 つ。
+fn agent_dots<'a>(agents: impl Iterator<Item = &'a AgentRow>) -> Vec<AgentState> {
+    let states: Vec<_> = agents.map(|agent| agent.state).collect();
+    [
+        AgentState::Blocked,
+        AgentState::Working,
+        AgentState::Done,
+        AgentState::Idle,
+    ]
+    .into_iter()
+    .filter(|state| states.contains(state))
+    .collect()
+}
+
+/// workspace ライン・タブバーの 1 項目（デバッグ用セレクタは `selector`）。アクティブなものは
+/// 背景を浮かせて強調する。上下の段で揃うよう幅は固定し、収まらないラベルは省略する。
+/// `dots` の Agent の状態をラベルの後ろに色付きの点で示す。
+fn bar_item(
+    selector: &str,
+    active: bool,
+    glyph: Icon,
+    label: String,
+    dots: &[AgentState],
+    config: &Config,
+) -> gpui::Div {
+    let ui = &config.theme.ui;
+    let text_color = if active {
+        ui.foreground
+    } else {
+        ui.inactive_foreground
+    };
+    let hover_color = rgb(ui.foreground);
+    let item_selector = selector.to_string();
+    let dots = dots.iter().map(|&state| {
+        let dot_selector = format!("{selector}-dot-{}", state.label());
+        div()
+            .debug_selector(move || dot_selector)
+            .flex_none()
+            .size(px(6.0))
+            .rounded_full()
+            .bg(rgb(state_color(ui, state)))
+    });
     div()
+        .debug_selector(move || item_selector)
         .flex()
         .flex_none()
         .items_center()
-        .w(px(BAR_ITEM_WIDTH))
+        .gap(px(6.0))
+        .w(px(config.ui.item_width))
+        .h(px(BAR_BUTTON_SIZE))
         .overflow_hidden()
-        .px(px(12.0))
-        .border_r_1()
-        .border_color(rgb(theme.ui.bar_border))
-        .text_color(rgb(if active {
-            theme.terminal.foreground
-        } else {
-            theme.ui.inactive_foreground
-        }))
+        .px(px(10.0))
+        .rounded(px(BAR_ITEM_RADIUS))
+        .border_1()
+        .border_color(Rgba::default())
+        .text_color(rgb(text_color))
+        .cursor_pointer()
+        .hover(move |item| item.text_color(hover_color))
         .when(active, |item| {
-            item.bg(config.translucent(theme.terminal.background))
+            item.bg(rgb(ui.raised_background))
+                .border_color(rgb(ui.strong_border))
+                .font_weight(FontWeight::MEDIUM)
         })
-        .child(div().min_w(px(0.0)).truncate().child(label))
+        .child(icon(glyph, 12.0))
+        .child(div().flex_1().min_w(px(0.0)).truncate().child(label))
+        .children(dots)
 }
 
 /// 同梱の SVG アイコン（色は `text_color` で付ける）。
@@ -1717,7 +1818,53 @@ mod tests {
         let tab_item = cx.debug_bounds("tab-0").expect("tab item is rendered");
         // ラベルの長さ（"Workspace 1" と "1: shell"）が違っても幅は揃う
         assert_eq!(workspace_item.size.width, tab_item.size.width);
-        assert_eq!(workspace_item.size.width, px(BAR_ITEM_WIDTH));
+        assert_eq!(
+            workspace_item.size.width,
+            px(Config::default().ui.item_width)
+        );
+        // 上下の段で項目の左端も揃う
+        assert_eq!(workspace_item.left(), tab_item.left());
+    }
+
+    #[gpui::test]
+    fn bar_item_width_is_configurable(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace_with_init_lua(cx, "kugutsu.ui.item_width = 200");
+        cx.run_until_parked();
+        assert_eq!(bounds(cx, "workspace-0").size.width, px(200.0));
+        assert_eq!(bounds(cx, "tab-0").size.width, px(200.0));
+    }
+
+    #[gpui::test]
+    fn plus_buttons_open_a_workspace_and_a_tab(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        cx.run_until_parked();
+        click(cx, "tab-new");
+        assert_eq!(active_tab_count(&workspace, cx), 2);
+        click(cx, "workspace-new");
+        assert_eq!(workspace_count(&workspace, cx), 2);
+        assert_eq!(active_position(&workspace, cx), (1, 0));
+    }
+
+    #[gpui::test]
+    fn bar_items_show_agent_state_dots(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_agents(cx);
+        // workspace 1 は blocked と working、workspace 2 は done
+        assert!(
+            bounds(cx, "workspace-0").contains(&bounds(cx, "workspace-0-dot-blocked").center())
+        );
+        assert!(cx.debug_bounds("workspace-0-dot-working").is_some());
+        assert!(cx.debug_bounds("workspace-1-dot-done").is_some());
+        assert!(cx.debug_bounds("tab-0-dot-blocked").is_some());
+        assert_eq!(
+            workspace.read_with(cx, |w, cx| {
+                let groups = w.agent_groups(cx);
+                (
+                    agent_dots(groups[0].agents.iter()),
+                    agent_dots(groups[2].agents.iter()),
+                )
+            }),
+            (vec![AgentState::Blocked, AgentState::Working], vec![])
+        );
     }
 
     /// 項目が 5 個ほどしか並ばない幅のウィンドウで、`keys` を `count` 回押す。
@@ -1764,7 +1911,10 @@ mod tests {
         let start = bounds(cx, "tab-0").left();
 
         click(cx, "tab-scroll-left");
-        assert_eq!(bounds(cx, "tab-0").left(), start + px(BAR_ITEM_WIDTH));
+        assert_eq!(
+            bounds(cx, "tab-0").left(),
+            start + px(bar_item_step(&Config::default()))
+        );
 
         click(cx, "tab-scroll-right");
         assert_eq!(bounds(cx, "tab-0").left(), start);
@@ -1779,7 +1929,10 @@ mod tests {
         let start = bounds(cx, "workspace-0").left();
 
         click(cx, "workspace-scroll-left");
-        assert_eq!(bounds(cx, "workspace-0").left(), start + px(BAR_ITEM_WIDTH));
+        assert_eq!(
+            bounds(cx, "workspace-0").left(),
+            start + px(bar_item_step(&Config::default()))
+        );
 
         click(cx, "workspace-scroll-right");
         assert_eq!(bounds(cx, "workspace-0").left(), start);

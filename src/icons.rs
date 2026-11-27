@@ -46,6 +46,10 @@ icons! {
     Circle => "circle",
     Workspace => "workspace",
     Puppet => "puppet",
+    Terminal => "terminal",
+    Plus => "plus",
+    ChevronLeft => "chevron-left",
+    ChevronRight => "chevron-right",
 }
 
 /// Agent の状態を表すアイコン。色だけでなく形でも区別できるようにする。

@@ -65,6 +65,7 @@ Kugutsu uses a tmux-style prefix key. Press the prefix `Ctrl-b`, then press one 
 | `Ctrl-b` `N`      | Next workspace            |
 | `Ctrl-b` `P`      | Previous workspace        |
 | `Ctrl-b` `?`      | Show key bindings         |
+| `Ctrl-b` `r`      | Reload `init.lua`         |
 | `Ctrl-b` `Ctrl-b` | Send `Ctrl-b` to the terminal |
 | `Esc`             | Cancel the prefix         |
 
@@ -82,13 +83,15 @@ Typing returns to the bottom. New output keeps the current scroll position. Prog
 
 ## Configuration
 
-Kugutsu reads `init.lua` once on startup from the first of these locations whose environment variable is set:
+Kugutsu reads `init.lua` on startup from the first of these locations whose environment variable is set:
 
 1. `$KUGUTSU_CONFIG` (the path of the file itself)
 2. `$XDG_CONFIG_HOME/kugutsu/init.lua`
 3. `~/.config/kugutsu/init.lua`
 
 The file is plain Lua 5.4. Without the file, every option keeps its default.
+
+Press `Ctrl-b` `r` (the `reload_config` action) to read `init.lua` again without restarting. It is evaluated in a fresh Lua state, plugins are loaded again, and the new options, key mappings, theme and background transparency apply to every open pane. Errors are shown in the status line as on startup, and options set before an error still apply.
 
 ```lua
 kugutsu.opt.prefix = "ctrl-a"
@@ -184,6 +187,7 @@ Mapping a key that is already mapped replaces it in place; a new key is added to
 | `next_workspace`   | Next workspace            |
 | `prev_workspace`   | Previous workspace        |
 | `show_keymap`      | Show key bindings         |
+| `reload_config`    | Reload init.lua           |
 
 A Lua function runs when the key is pressed. Inside it, `kugutsu.action.<name>()` runs one of the actions above, and `kugutsu.action.select_tab(n)` selects tab `n` (1–9). The actions run in order after the function returns. `kugutsu.action` can only be called from a mapped function, not while `init.lua` is loading. Errors raised by the function are shown in the status line.
 
@@ -403,7 +407,7 @@ kugutsu install              lockfile -> plugins directory
 A typical lifecycle:
 
 1. Add a plugin to the spec. The status line shows `plugins: 1 missing — run kugutsu install`.
-2. Run `kugutsu lock` and `kugutsu install`, then restart Kugutsu.
+2. Run `kugutsu lock` and `kugutsu install`, then reload the configuration with `Ctrl-b` `r` (or restart Kugutsu).
 3. Commit `init.lua` and `kugutsu.lock` to your dotfiles. On another machine, `kugutsu install` checks out the same commits.
 4. `kugutsu update` and `kugutsu install` move plugins to their latest commits. To roll back, revert the lockfile and run `kugutsu install`.
 5. Remove a plugin from the spec. It is no longer loaded; `kugutsu lock` and `kugutsu install` remove it from the lockfile and from disk.

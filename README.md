@@ -65,7 +65,7 @@ Kugutsu uses a tmux-style prefix key. Press the prefix `Ctrl-b`, then press one 
 | `Ctrl-b` `Ctrl-b` | Send `Ctrl-b` to the terminal |
 | `Esc`             | Cancel the prefix         |
 
-Keys without a binding are discarded after the prefix. The prefix can be changed with `kugutsu.opt.prefix` (see [Configuration](#configuration)).
+Keys without a binding are discarded after the prefix. The prefix can be changed with `kugutsu.opt.prefix`, and the bindings with `kugutsu.keymap` (see [Key mappings](#key-mappings)).
 
 ### Scrolling
 
@@ -115,8 +115,68 @@ The following are errors:
 - A `font_size` or `line_height` that is zero, negative, NaN or infinite
 - A `theme` that is not a bundled theme
 - A `background_opacity` outside `0.0`–`1.0`, or NaN
+- Invalid key mappings (see [Key mappings](#key-mappings))
 
 Errors are shown on the right of the status line with the line number in `init.lua`, and Kugutsu keeps running. Options set before the error still apply; the rest keep their defaults.
+
+### Key mappings
+
+`kugutsu.keymap.set(key, action, opts)` maps a key to an action, and `kugutsu.keymap.del(key)` removes a mapping. The [default key bindings](#default-keybind) stay unless you replace or delete them.
+
+```lua
+-- Ctrl-b t opens a tab; the description is shown in the which-key list and in Ctrl-b ?
+kugutsu.keymap.set("<prefix>t", "new_tab", { desc = "Open a tab" })
+-- Ctrl-b | splits the pane left / right
+kugutsu.keymap.set("<prefix>|", "split_horizontal")
+-- Ctrl-Shift-t opens a tab without the prefix
+kugutsu.keymap.set("ctrl-shift-t", "new_tab")
+-- A Lua function can run several actions
+kugutsu.keymap.set("<prefix>w", function()
+  kugutsu.action.new_tab()
+  kugutsu.action.split_horizontal()
+end, { desc = "Tab with two panes" })
+-- Ctrl-b x no longer closes the pane
+kugutsu.keymap.del("<prefix>x")
+```
+
+`key` is a keystroke written like `ctrl-a`, `shift-c` or `?`:
+
+- `<prefix>t` — press the prefix, then `t`. `<prefix>` stands for the prefix set with `kugutsu.opt.prefix`, so mappings keep working when you change it.
+- `ctrl-shift-t` — without `<prefix>`, the key runs the action by itself and is not sent to the terminal. The prefix key itself cannot be mapped this way.
+
+Mapping a key that is already mapped replaces it in place; a new key is added to the end of the list.
+
+`action` is either the name of an action or a Lua function:
+
+| Action             | Default description       |
+| ------------------ | ------------------------- |
+| `new_tab`          | New tab                   |
+| `next_tab`         | Next tab                  |
+| `prev_tab`         | Previous tab              |
+| `split_horizontal` | Split pane left / right   |
+| `split_vertical`   | Split pane top / bottom   |
+| `focus_left`       | Focus left pane           |
+| `focus_down`       | Focus pane below          |
+| `focus_up`         | Focus pane above          |
+| `focus_right`      | Focus right pane          |
+| `close_pane`       | Close pane                |
+| `toggle_sidebar`   | Toggle agent sidebar      |
+| `new_workspace`    | New workspace             |
+| `next_workspace`   | Next workspace            |
+| `prev_workspace`   | Previous workspace        |
+| `show_keymap`      | Show key bindings         |
+
+A Lua function runs when the key is pressed. Inside it, `kugutsu.action.<name>()` runs one of the actions above, and `kugutsu.action.select_tab(n)` selects tab `n` (1–9). The actions run in order after the function returns. `kugutsu.action` can only be called from a mapped function, not while `init.lua` is loading. Errors raised by the function are shown in the status line.
+
+`opts.desc` is the description shown in the which-key list above the status line and in the key binding list (`Ctrl-b ?`). Without it, the default description of the action is used, or `Lua function` for a function. Adjacent mappings with the same description are shown as one row (e.g. `1-9  Select tab N`). The which-key list shows only `<prefix>` mappings.
+
+The following are errors:
+
+- A `key` that is not a string or not a valid keystroke, or `<prefix>` without a key after it
+- An unknown action name, or an `action` that is neither a string nor a function
+- An `opts` that is not a table, or a `desc` that is not a string
+- Deleting a key that is not mapped
+- Mapping the prefix key without `<prefix>`
 
 ### Themes
 

@@ -439,3 +439,47 @@ Errors are shown in the status line with the plugin name (e.g. `notes.kugutsu: p
 ### External plugins (Nix)
 
 A symlink or a directory without `.git` under `$XDG_DATA_HOME/kugutsu/plugins/` is **external**: `kugutsu install` never clones, checks out or removes it, and Kugutsu loads it like any other plugin when its name is in the spec. This way plugins can be provided from the Nix store, and the same `init.lua` works on machines with and without Nix.
+
+### Home Manager
+
+The flake provides a [Home Manager](https://github.com/nix-community/home-manager) module that installs Kugutsu and links plugins from the Nix store, so a Nix setup does not need `kugutsu lock` or `kugutsu install`:
+
+```nix
+# flake.nix
+inputs.kugutsu.url = "github:myuron/kugutsu";
+
+# home.nix
+{ inputs, pkgs, ... }:
+{
+  imports = [ inputs.kugutsu.homeManagerModules.default ];
+
+  programs.kugutsu = {
+    enable = true;
+    plugins = [
+      (pkgs.fetchFromGitHub {
+        name = "catppuccin.kugutsu"; # the plugin name in the spec
+        owner = "catppuccin";
+        repo = "catppuccin.kugutsu";
+        rev = "v1.0.0";
+        hash = "sha256-...";
+      })
+      { name = "notes.kugutsu"; src = ./notes; }
+    ];
+    initLua = ''
+      kugutsu.plugins.setup({ "catppuccin/catppuccin.kugutsu", "me/notes.kugutsu" })
+    '';
+  };
+}
+```
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `enable` | `false` | Install Kugutsu |
+| `package` | the package of this flake | The Kugutsu package |
+| `plugins` | `[ ]` | Plugins linked to `$XDG_DATA_HOME/kugutsu/plugins/<name>`: a derivation, whose name is the plugin name, or `{ name, src }` |
+| `initLua` | `null` | Contents of `$XDG_CONFIG_HOME/kugutsu/init.lua`. When `null`, the file is not managed |
+
+- The links are external plugins, so `kugutsu install` leaves them alone, and the same `init.lua` works on machines without Nix.
+- The name of each plugin must match its name in the spec (the last part of its URL without `.git`, or `name`). A plugin is loaded only when it is in the spec.
+- `fetchFromGitHub` names its result `source` unless `name` is given; pass `name`, or use the `{ name, src }` form.
+- Two plugins with the same name are an error.

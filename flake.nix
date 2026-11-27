@@ -5,6 +5,9 @@
     treefmt-nix.url = "github:numtide/treefmt-nix";
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
+    # home-manager モジュールのテストにだけ使う
+    home-manager.url = "github:nix-community/home-manager";
+    home-manager.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -14,6 +17,7 @@
       flake-parts,
       treefmt-nix,
       rust-overlay,
+      home-manager,
     }:
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
@@ -22,6 +26,9 @@
       systems = [
         "x86_64-linux"
       ];
+      flake = {
+        homeManagerModules.default = import ./nix/home-manager.nix { inherit self; };
+      };
       perSystem = { pkgs, system, ... }: {
         _module.args.pkgs = import nixpkgs {
           inherit system;
@@ -37,6 +44,12 @@
         };
         packages = {
           default = pkgs.callPackage ./nix/rust.nix { };
+        };
+        checks = {
+          home-manager-module = pkgs.callPackage ./nix/home-manager-test.nix {
+            inherit home-manager;
+            module = self.homeManagerModules.default;
+          };
         };
         devShells = {
           default =

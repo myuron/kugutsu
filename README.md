@@ -327,7 +327,7 @@ Like Nix flakes, **only explicit commands change plugins or the lockfile**. Star
 
 ```lua
 kugutsu.plugins.setup({
-  "catppuccin/catppuccin.kugutsu",                       -- GitHub shorthand
+  "myuron/catppuccin.kugutsu",                           -- GitHub shorthand
   { "folke/tokyonight.kugutsu", rev = "v1.0.0" },        -- tag, branch or commit
   { url = "https://git.example.com/me/foo.kugutsu.git" },
   { "bob/theme.kugutsu", name = "bob-theme.kugutsu" },   -- custom name
@@ -365,7 +365,7 @@ The spec is plain Lua, so it can be split into modules. Nested lists are flatten
 kugutsu.plugins.setup({
   require("plugins.ui"),
   require("plugins.agents"),
-  "catppuccin/catppuccin.kugutsu",
+  "myuron/catppuccin.kugutsu",
 })
 
 -- ~/.config/kugutsu/lua/plugins/agents.lua
@@ -418,7 +418,7 @@ The lockfile is TOML, sorted by name:
 version = 1
 
 [plugins."catppuccin.kugutsu"]
-url = "https://github.com/catppuccin/catppuccin.kugutsu.git"
+url = "https://github.com/myuron/catppuccin.kugutsu.git"
 rev = "v1.0.0"
 commit = "def4567890abcdef1234567890abcdef12345678"
 ```
@@ -443,3 +443,47 @@ Errors are shown in the status line with the plugin name (e.g. `notes.kugutsu: p
 ### External plugins (Nix)
 
 A symlink or a directory without `.git` under `$XDG_DATA_HOME/kugutsu/plugins/` is **external**: `kugutsu install` never clones, checks out or removes it, and Kugutsu loads it like any other plugin when its name is in the spec. This way plugins can be provided from the Nix store, and the same `init.lua` works on machines with and without Nix.
+
+### Home Manager
+
+The flake provides a [Home Manager](https://github.com/nix-community/home-manager) module that installs Kugutsu and links plugins from the Nix store, so a Nix setup does not need `kugutsu lock` or `kugutsu install`:
+
+```nix
+# flake.nix
+inputs.kugutsu.url = "github:myuron/kugutsu";
+
+# home.nix
+{ inputs, pkgs, ... }:
+{
+  imports = [ inputs.kugutsu.homeManagerModules.default ];
+
+  programs.kugutsu = {
+    enable = true;
+    plugins = [
+      (pkgs.fetchFromGitHub {
+        name = "catppuccin.kugutsu"; # the plugin name in the spec
+        owner = "myuron";
+        repo = "catppuccin.kugutsu";
+        rev = "v1.0.0";
+        hash = "sha256-...";
+      })
+      { name = "notes.kugutsu"; src = ./notes; }
+    ];
+    initLua = ''
+      kugutsu.plugins.setup({ "myuron/catppuccin.kugutsu", "me/notes.kugutsu" })
+    '';
+  };
+}
+```
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `enable` | `false` | Install Kugutsu |
+| `package` | the package of this flake | The Kugutsu package |
+| `plugins` | `[ ]` | Plugins linked to `$XDG_DATA_HOME/kugutsu/plugins/<name>`: a derivation, whose name is the plugin name, or `{ name, src }` |
+| `initLua` | `null` | Contents of `$XDG_CONFIG_HOME/kugutsu/init.lua`. When `null`, the file is not managed |
+
+- The links are external plugins, so `kugutsu install` leaves them alone, and the same `init.lua` works on machines without Nix.
+- The name of each plugin must match its name in the spec (the last part of its URL without `.git`, or `name`). A plugin is loaded only when it is in the spec.
+- `fetchFromGitHub` names its result `source` unless `name` is given; pass `name`, or use the `{ name, src }` form.
+- Two plugins with the same name are an error.

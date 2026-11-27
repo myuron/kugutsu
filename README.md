@@ -38,6 +38,8 @@ nix develop --command cargo run --release
 
 If you use [direnv](https://direnv.net/), run `direnv allow` once and you can drop the `nix develop --command` prefix.
 
+Inside the devShell, `KUGUTSU_CONFIG` points to the sample configuration in [`examples/config/kugutsu/init.lua`](examples/config/kugutsu/init.lua), so `cargo run` uses it instead of your own `init.lua`.
+
 ## Default Keybind
 
 Kugutsu uses a tmux-style prefix key. Press the prefix `Ctrl-b`, then press one of the keys below. While the prefix is pressed, the keys that can follow it are listed above the status line.
@@ -77,7 +79,13 @@ Typing returns to the bottom. New output keeps the current scroll position. Prog
 
 ## Configuration
 
-Kugutsu reads `$XDG_CONFIG_HOME/kugutsu/init.lua` (or `~/.config/kugutsu/init.lua` when `XDG_CONFIG_HOME` is not set) once on startup. The file is plain Lua 5.4. Without the file, every option keeps its default.
+Kugutsu reads `init.lua` once on startup from the first of these locations whose environment variable is set:
+
+1. `$KUGUTSU_CONFIG` (the path of the file itself)
+2. `$XDG_CONFIG_HOME/kugutsu/init.lua`
+3. `~/.config/kugutsu/init.lua`
+
+The file is plain Lua 5.4. Without the file, every option keeps its default.
 
 ```lua
 kugutsu.opt.prefix = "ctrl-a"

@@ -933,7 +933,11 @@ impl WorkspaceView {
                         .text_color(rgb(ui.inactive_foreground))
                 }
             })
-            .child(icon(Icon::Keyboard, 12.0))
+            .child(icon(Icon::Keyboard, 12.0).text_color(rgb(if armed {
+                ui.prefix_indicator
+            } else {
+                ui.inactive_foreground
+            })))
             .child(self.prefix_label());
         div()
             .debug_selector(|| "status-line".into())
@@ -1360,7 +1364,6 @@ fn bar_button(
     glyph: Icon,
     ui: &UiColors,
 ) -> Stateful<gpui::Div> {
-    let hover_color = rgb(ui.foreground);
     let hover_background = rgb(ui.raised_background);
     div()
         .id(SharedString::from(format!("{name}-{action}")))
@@ -1373,8 +1376,9 @@ fn bar_button(
         .rounded(px(BAR_ITEM_RADIUS))
         .text_color(rgb(ui.inactive_foreground))
         .cursor_pointer()
-        .hover(move |button| button.text_color(hover_color).bg(hover_background))
-        .child(icon(glyph, 12.0))
+        .hover(move |button| button.bg(hover_background))
+        // svg は親の文字色を継承しないので色を直接付ける
+        .child(icon(glyph, 12.0).text_color(rgb(ui.inactive_foreground)))
 }
 
 /// バーを `delta` だけ横にスクロールするボタン（正の値で左端側へ戻る）。
@@ -1475,7 +1479,7 @@ fn bar_item(
                 .border_color(rgb(ui.strong_border))
                 .font_weight(FontWeight::MEDIUM)
         })
-        .child(icon(glyph, 12.0))
+        .child(icon(glyph, 12.0).text_color(rgb(text_color)))
         .child(div().flex_1().min_w(px(0.0)).truncate().child(label))
         .children(dots)
 }

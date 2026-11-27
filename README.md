@@ -64,3 +64,13 @@ Kugutsu uses a tmux-style prefix key. Press the prefix `Ctrl-b`, then press one 
 | `Esc`             | Cancel the prefix         |
 
 Keys without a binding are discarded after the prefix.
+
+### Scrolling
+
+| Input                    | Action                          |
+| ------------------------ | ------------------------------- |
+| Mouse wheel / touchpad   | Scroll through the scrollback   |
+| `Shift-PageUp`           | Scroll up one page              |
+| `Shift-PageDown`         | Scroll down one page            |
+
+Typing returns to the bottom. New output keeps the current scroll position. Programs that enable mouse reporting receive wheel events, and full-screen programs such as `less` or `vim` receive them as arrow keys.

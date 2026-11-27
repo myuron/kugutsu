@@ -57,6 +57,7 @@ pub struct Row {
     pub segments: Vec<Segment>,
 }
 
+#[cfg(test)]
 impl Row {
     /// 行全体のテキスト（全角文字の後半セルは含まない）。
     pub fn text(&self) -> String {

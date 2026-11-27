@@ -3,19 +3,23 @@
 use alacritty_terminal::event::Event;
 use futures::StreamExt;
 use futures::channel::mpsc::UnboundedReceiver;
+use std::cell::Cell;
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::{
     App, Bounds, ContentMask, Context, ElementInputHandler, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight, Hsla, KeyDownEvent, Pixels,
-    Point, Render, StrikethroughStyle, Subscription, Task, TextRun, UTF16Selection, UnderlineStyle,
-    Window, canvas, div, fill, font, point, prelude::*, px, rgb, size,
+    FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight, Hsla, KeyDownEvent,
+    Keystroke, Pixels, Point, Render, ScrollWheelEvent, StrikethroughStyle, Subscription, Task,
+    TextRun, UTF16Selection, UnderlineStyle, Window, canvas, div, fill, font, point, prelude::*,
+    px, rgb, size,
 };
 
 use crate::agents::{self, AgentTracker};
 use crate::terminal::content::{Cursor, Snapshot, Style};
+use crate::terminal::scroll::{self, Wheel, WheelAccumulator, WheelMode};
 use crate::terminal::size::GridSize;
-use crate::terminal::{Terminal, TerminalEvent, colors, keys};
+use crate::terminal::{Scroll, Terminal, TerminalEvent, colors, keys};
 
 const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT_RATIO: f32 = 1.3;
@@ -42,6 +46,10 @@ pub struct TerminalView {
     marked_text: Option<String>,
     /// フォアグラウンドで動いている Agent（[`TerminalView::refresh_agent`] で更新する）。
     agent: Option<AgentTracker>,
+    /// ホイールの 1 行に満たない移動量の持ち越し。
+    wheel: WheelAccumulator,
+    /// 前回描画したセル格子の左上（ホイール位置をセルに換算するため）。
+    grid_origin: Rc<Cell<Point<Pixels>>>,
     _events: Task<()>,
     _blur: Subscription,
 }
@@ -114,6 +122,8 @@ impl TerminalView {
             title: None,
             marked_text: None,
             agent: None,
+            wheel: WheelAccumulator::default(),
+            grid_origin: Rc::default(),
             _events: Self::handle_events(events, window, cx),
             _blur: blur,
         }
@@ -183,10 +193,69 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        if let Some(scroll) = self.page_scroll(&event.keystroke) {
+            self.terminal.scroll(scroll);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         if let Some(bytes) = keys::keystroke_to_bytes(&event.keystroke, self.terminal.app_cursor())
         {
+            // スクロールバックを見ていれば最下部に戻るので描き直す
             self.terminal.write(bytes);
+            cx.notify();
             cx.stop_propagation();
+        }
+    }
+
+    /// Shift+PageUp / Shift+PageDown でスクロールバックをページ単位で動かす。
+    /// alternate screen にはスクロールバックが無いので、プログラムにそのまま渡す。
+    fn page_scroll(&self, keystroke: &Keystroke) -> Option<Scroll> {
+        let modifiers = &keystroke.modifiers;
+        let shift_only = modifiers.shift
+            && !(modifiers.control || modifiers.alt || modifiers.platform || modifiers.function);
+        if !shift_only || self.terminal.alt_screen() {
+            return None;
+        }
+        match keystroke.key.as_str() {
+            "pageup" => Some(Scroll::PageUp),
+            "pagedown" => Some(Scroll::PageDown),
+            _ => None,
+        }
+    }
+
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        let lines = self.wheel.lines(event.delta, self.metrics.cell_height);
+        if lines == 0 {
+            return;
+        }
+        match self.terminal.wheel_mode() {
+            WheelMode::Report { sgr } => {
+                let (col, row) = cell_at(
+                    event.position,
+                    self.grid_origin.get(),
+                    &self.metrics,
+                    self.terminal.size(),
+                );
+                let wheel = if lines > 0 { Wheel::Up } else { Wheel::Down };
+                let report = scroll::mouse_report(wheel, col, row, &event.modifiers, sgr);
+                self.terminal
+                    .write(report.repeat(lines.unsigned_abs() as usize));
+            }
+            WheelMode::Arrows { app_cursor } => {
+                self.terminal
+                    .write(scroll::alternate_scroll(lines, app_cursor));
+            }
+            WheelMode::Scrollback => {
+                self.terminal.scroll(Scroll::Delta(lines));
+                cx.notify();
+            }
         }
     }
 }
@@ -317,6 +386,7 @@ impl Render for TerminalView {
         let prepaint_metrics = self.metrics.clone();
         let paint_metrics = self.metrics.clone();
         let focus_handle = self.focus_handle.clone();
+        let grid_origin = self.grid_origin.clone();
         // TUI はカーソルを隠して自前で描くので、表示状態に関わらないカーソル位置に置く
         let preedit = self.marked_text.clone().and_then(|text| {
             Some(Preedit {
@@ -329,6 +399,7 @@ impl Render for TerminalView {
             .id("terminal")
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .size_full()
             .p(px(PADDING))
             .bg(rgb(colors::DEFAULT_BACKGROUND))
@@ -337,6 +408,7 @@ impl Render for TerminalView {
                     // 要素自身の大きさからグリッドサイズを決める。変わっていれば PTY をリサイズし、
                     // 同じフレームで描けるようにスナップショットを取り直す（描画中の notify は無視されるため）
                     move |bounds, _, cx| {
+                        grid_origin.set(bounds.origin);
                         let size = prepaint_metrics.grid_size(bounds);
                         if size == current_size {
                             return snapshot;
@@ -382,6 +454,24 @@ fn cursor_cell_bounds(
             origin.y + metrics.cell_height * row as f32,
         ),
         size(metrics.cell_width, metrics.cell_height),
+    )
+}
+
+/// ウィンドウ上の位置 `position` にある、`origin` を左上とするセル格子のセル（列, 行）。
+/// 格子の外は端のセルに丸める。
+fn cell_at(
+    position: Point<Pixels>,
+    origin: Point<Pixels>,
+    metrics: &CellMetrics,
+    grid: GridSize,
+) -> (usize, usize) {
+    let index = |offset: Pixels, cell: Pixels, count: u16| {
+        let cells = (f32::from(offset) / f32::from(cell)).floor();
+        (cells.max(0.0) as usize).min(usize::from(count).saturating_sub(1))
+    };
+    (
+        index(position.x - origin.x, metrics.cell_width, grid.cols),
+        index(position.y - origin.y, metrics.cell_height, grid.rows),
     )
 }
 
@@ -671,6 +761,114 @@ mod tests {
         assert_eq!(text_origin, point(px(5.0), px(40.0)));
     }
 
+    #[test]
+    fn cell_at_maps_positions_into_the_grid() {
+        let metrics = test_metrics();
+        let origin = point(px(5.0), px(5.0));
+        let grid = GridSize::from_pixels(100.0, 100.0, 10.0, 20.0);
+        assert_eq!(
+            cell_at(point(px(5.0), px(5.0)), origin, &metrics, grid),
+            (0, 0)
+        );
+        assert_eq!(
+            cell_at(point(px(39.0), px(46.0)), origin, &metrics, grid),
+            (3, 2)
+        );
+        // 余白や外側は端のセルに丸める
+        assert_eq!(
+            cell_at(point(px(0.0), px(0.0)), origin, &metrics, grid),
+            (0, 0)
+        );
+        assert_eq!(
+            cell_at(point(px(999.0), px(999.0)), origin, &metrics, grid),
+            (9, 4)
+        );
+    }
+
+    mod scrolling {
+        use super::ime::{open_script, wait_for_screen};
+        use super::*;
+        use gpui::{Entity, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext};
+
+        /// 画面からあふれる出力をした後に `ready` を表示し、1 行読んで `got:<行>|` と表示する。
+        const LONG_OUTPUT: &str =
+            "seq 1 200; printf ready; read line; printf \"got:$line|\"; sleep 30";
+
+        fn wheel(cx: &mut VisualTestContext, lines: f32) {
+            wheel_at(cx, point(px(20.0), px(20.0)), lines);
+        }
+
+        fn wheel_at(cx: &mut VisualTestContext, position: Point<Pixels>, lines: f32) {
+            cx.simulate_event(ScrollWheelEvent {
+                position,
+                delta: ScrollDelta::Lines(point(0.0, lines)),
+                ..ScrollWheelEvent::default()
+            });
+        }
+
+        fn display_offset(view: &Entity<TerminalView>, cx: &mut VisualTestContext) -> usize {
+            view.read_with(cx, |view, _| view.terminal.display_offset())
+        }
+
+        #[gpui::test]
+        fn wheel_scrolls_through_scrollback(cx: &mut TestAppContext) {
+            let (view, cx) = open_script(cx, LONG_OUTPUT);
+            wheel(cx, 3.0);
+            assert_eq!(display_offset(&view, cx), 3);
+            wheel(cx, -1.0);
+            assert_eq!(display_offset(&view, cx), 2);
+        }
+
+        #[gpui::test]
+        fn typing_returns_to_bottom(cx: &mut TestAppContext) {
+            let (view, cx) = open_script(cx, LONG_OUTPUT);
+            wheel(cx, 3.0);
+            cx.simulate_input("ab");
+            assert_eq!(display_offset(&view, cx), 0);
+            cx.simulate_keystrokes("enter");
+            wait_for_screen(&view, cx, "got:ab|");
+        }
+
+        #[gpui::test]
+        fn shift_page_keys_scroll_without_reaching_the_program(cx: &mut TestAppContext) {
+            let (view, cx) = open_script(cx, LONG_OUTPUT);
+            let rows = view.read_with(cx, |view, _| view.grid_size().rows as usize);
+            cx.simulate_keystrokes("shift-pageup shift-pageup");
+            assert_eq!(display_offset(&view, cx), rows * 2);
+            cx.simulate_keystrokes("shift-pagedown");
+            assert_eq!(display_offset(&view, cx), rows);
+            cx.simulate_keystrokes("enter");
+            wait_for_screen(&view, cx, "got:|");
+        }
+
+        #[gpui::test]
+        fn wheel_is_reported_to_programs_using_the_mouse(cx: &mut TestAppContext) {
+            // SGR 形式のマウスレポートを有効にし、届いた 10 バイトを表示する
+            let script = "stty raw -echo; printf '\\033[?1000h\\033[?1006hready'; \
+                reply=$(dd bs=1 count=10 2>/dev/null); \
+                printf 'got:%s|' \"$reply\" | tr -d '\\033'; sleep 30";
+            let (view, cx) = open_script(cx, script);
+            let metrics = view.read_with(cx, |view, _| view.metrics.clone());
+            // 3 列目・2 行目のセルの中
+            let position = point(
+                px(PADDING) + metrics.cell_width * 2.5,
+                px(PADDING) + metrics.cell_height * 1.5,
+            );
+            wheel_at(cx, position, 1.0);
+            wait_for_screen(&view, cx, "got:[<64;3;2M|");
+        }
+
+        #[gpui::test]
+        fn wheel_sends_arrows_on_alternate_screen(cx: &mut TestAppContext) {
+            let script = "stty raw -echo; printf '\\033[?1049hready'; \
+                reply=$(dd bs=1 count=6 2>/dev/null); \
+                printf 'got:%s|' \"$reply\" | tr -d '\\033'; sleep 30";
+            let (view, cx) = open_script(cx, script);
+            wheel(cx, -2.0);
+            wait_for_screen(&view, cx, "got:[B[B|");
+        }
+    }
+
     mod ime {
         use super::*;
         use crate::terminal::{SpawnOptions, Terminal};
@@ -689,7 +887,7 @@ mod tests {
         }
 
         /// `script` を動かすビューを開いてフォーカスし、`ready` が表示されるまで待つ。
-        fn open_script<'a>(
+        pub(super) fn open_script<'a>(
             cx: &'a mut TestAppContext,
             script: &str,
         ) -> (Entity<TerminalView>, &'a mut VisualTestContext) {
@@ -705,7 +903,11 @@ mod tests {
         }
 
         /// 画面に `needle` が現れるまで待つ（PTY 上のプロセスは実時間で動くため）。
-        fn wait_for_screen(view: &Entity<TerminalView>, cx: &mut VisualTestContext, needle: &str) {
+        pub(super) fn wait_for_screen(
+            view: &Entity<TerminalView>,
+            cx: &mut VisualTestContext,
+            needle: &str,
+        ) {
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
                 cx.run_until_parked();

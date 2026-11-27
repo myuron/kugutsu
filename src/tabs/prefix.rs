@@ -104,14 +104,33 @@ pub enum KeyOutcome {
     Command(Command),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PrefixKeymap {
+    prefix: Keystroke,
     armed: bool,
 }
 
+impl Default for PrefixKeymap {
+    fn default() -> Self {
+        Self::new(Keystroke::parse(DEFAULT_PREFIX).expect("default prefix is a valid keystroke"))
+    }
+}
+
 impl PrefixKeymap {
+    pub fn new(prefix: Keystroke) -> Self {
+        Self {
+            prefix,
+            armed: false,
+        }
+    }
+
+    /// prefix キー。
+    pub fn prefix(&self) -> &Keystroke {
+        &self.prefix
+    }
+
     pub fn handle(&mut self, keystroke: &Keystroke) -> KeyOutcome {
-        let is_prefix = is_prefix(keystroke);
+        let is_prefix = same_key(keystroke, &self.prefix);
         if !std::mem::take(&mut self.armed) {
             self.armed = is_prefix;
             return if is_prefix {
@@ -146,13 +165,14 @@ fn command_for(keystroke: &Keystroke) -> Option<Command> {
     }
 }
 
-fn is_prefix(keystroke: &Keystroke) -> bool {
-    matches(keystroke, DEFAULT_PREFIX)
-}
-
 /// `keystroke` が gpui 表記の `expected` と同じキー・修飾キーか。
 fn matches(keystroke: &Keystroke, expected: &str) -> bool {
     let expected = Keystroke::parse(expected).expect("key binding is a valid keystroke");
+    same_key(keystroke, &expected)
+}
+
+/// 2 つのキーストロークが同じキー・修飾キーか（IME の入力結果などは比べない）。
+fn same_key(keystroke: &Keystroke, expected: &Keystroke) -> bool {
     keystroke.key == expected.key && keystroke.modifiers == expected.modifiers
 }
 
@@ -261,6 +281,34 @@ mod tests {
             assert!(!key.contains(DEFAULT_PREFIX), "{key}");
             assert!(!description.is_empty(), "{key}");
         }
+    }
+
+    #[test]
+    fn uses_a_custom_prefix() {
+        let mut keymap = PrefixKeymap::new(Keystroke::parse("ctrl-a").unwrap());
+        assert_eq!(press(&mut keymap, DEFAULT_PREFIX), KeyOutcome::Forward);
+        assert!(!keymap.is_armed());
+        assert_eq!(press(&mut keymap, "ctrl-a"), KeyOutcome::Consumed);
+        assert!(keymap.is_armed());
+        assert_eq!(
+            press(&mut keymap, "c"),
+            KeyOutcome::Command(Command::NewTab)
+        );
+    }
+
+    #[test]
+    fn double_custom_prefix_forwards_it() {
+        let mut keymap = PrefixKeymap::new(Keystroke::parse("ctrl-a").unwrap());
+        press(&mut keymap, "ctrl-a");
+        assert_eq!(press(&mut keymap, "ctrl-a"), KeyOutcome::Forward);
+        assert!(!keymap.is_armed());
+    }
+
+    #[test]
+    fn exposes_the_prefix_for_display() {
+        let keymap = PrefixKeymap::new(Keystroke::parse("ctrl-a").unwrap());
+        assert_eq!(keymap.prefix().unparse(), "ctrl-a");
+        assert_eq!(PrefixKeymap::default().prefix().unparse(), DEFAULT_PREFIX);
     }
 
     #[test]

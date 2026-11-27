@@ -94,6 +94,8 @@ struct State {
     theme: Option<String>,
     /// `kugutsu.theme.register` で登録したテーマ（登録順）。
     registered_themes: Vec<theme::Theme>,
+    /// `kugutsu.opt.theme_overrides`。テーマを引いた後に掛ける。
+    theme_overrides: Option<theme::ThemePatch>,
     /// 最後の `kugutsu.plugins.setup` で宣言したプラグイン。
     plugins: Vec<PluginSpec>,
 }
@@ -204,6 +206,7 @@ fn evaluate_in(
         mut config,
         theme,
         registered_themes,
+        theme_overrides,
         ..
     } = std::mem::take(&mut *state.borrow_mut());
     if let (true, Some(name)) = (load_plugins, theme) {
@@ -217,6 +220,10 @@ fn evaluate_in(
             Ok(theme) => config.theme = theme,
             Err(err) => errors.push(format!("kugutsu.opt.theme: {err}")),
         }
+    }
+    // テーマが見つからなくても、上書きは既定のテーマに掛ける
+    if let Some(overrides) = &theme_overrides {
+        config.theme.apply(overrides);
     }
     // prefix は後から変えられるので、prefix と同じキーへの直接の割り当ては最後に確かめる
     if config.keymap.del(&Trigger::Direct(config.prefix.clone())) {
@@ -448,6 +455,9 @@ fn set_option(state: &mut State, key: &str, value: &Value) -> Result<(), String>
         "background_blur" => config.background_blur = boolean(path, value)?,
         // 名前だけを覚え、テーマは評価の最後に引く
         "theme" => state.theme = Some(string(path, value)?),
+        "theme_overrides" => {
+            state.theme_overrides = Some(theme::overrides(value).map_err(|e| invalid(&e))?)
+        }
         _ => return Err(unknown(key)),
     }
     Ok(())
@@ -472,6 +482,13 @@ fn get_option(lua: &Lua, state: &State, key: &str) -> Result<Value, String> {
         "font_size" => Ok(Value::Number(config.font_size.into())),
         "line_height" => Ok(Value::Number(config.line_height.into())),
         "theme" => string(state.theme.as_deref().unwrap_or(&config.theme.name)),
+        "theme_overrides" => match &state.theme_overrides {
+            None => Ok(Value::Nil),
+            Some(overrides) => overrides
+                .to_lua(lua)
+                .map(Value::Table)
+                .map_err(|err| err.to_string()),
+        },
         "background_opacity" => Ok(Value::Number(config.background_opacity.into())),
         "background_blur" => Ok(Value::Boolean(config.background_blur)),
         _ => Err(unknown(key)),
@@ -793,6 +810,88 @@ mod tests {
         assert_eq!(
             loaded.errors,
             vec!["kugutsu.opt.theme: unknown theme 'x'".to_string()]
+        );
+    }
+
+    #[test]
+    fn theme_overrides_apply_on_top_of_the_selected_theme() {
+        let config = eval_ok(
+            r##"kugutsu.opt.theme_overrides = {
+                terminal = { cursor = "#010203" },
+                ui = { active_pane_border = "#040506" },
+            }
+            kugutsu.opt.theme = "kugutsu-light""##,
+        );
+        let light = crate::theme::builtin("kugutsu-light").unwrap();
+        assert_eq!(config.theme.name, "kugutsu-light");
+        assert_eq!(config.theme.terminal.cursor, 0x010203);
+        assert_eq!(config.theme.ui.active_pane_border, 0x040506);
+        assert_eq!(config.theme.terminal.background, light.terminal.background);
+        assert_eq!(config.theme.ui.bar_background, light.ui.bar_background);
+
+        // テーマを選ばなければ既定のテーマに掛かる。最後の代入が有効
+        let config = eval_ok(
+            r##"kugutsu.opt.theme_overrides = { ui = { error = "#000001" } }
+            kugutsu.opt.theme_overrides = { ui = { agent_done = "#000002" } }"##,
+        );
+        assert_eq!(config.theme.ui.agent_done, 0x000002);
+        assert_eq!(config.theme.ui.error, Theme::default().ui.error);
+    }
+
+    #[test]
+    fn theme_overrides_apply_even_if_the_theme_is_unknown() {
+        let loaded = eval(
+            r##"kugutsu.opt.theme = "nope"
+            kugutsu.opt.theme_overrides = { ui = { error = "#000001" } }"##,
+        );
+        assert_eq!(loaded.errors.len(), 1);
+        assert_eq!(loaded.config.theme.name, "kugutsu-dark");
+        assert_eq!(loaded.config.theme.ui.error, 0x000001);
+    }
+
+    #[test]
+    fn invalid_theme_overrides_are_errors() {
+        for (value, expected) in [
+            (
+                "1",
+                "kugutsu.opt.theme_overrides: expected a table, got number",
+            ),
+            (
+                r#"{ ui = { error = "red" } }"#,
+                "kugutsu.opt.theme_overrides: ui.error: expected a color",
+            ),
+            (
+                "{ foo = {} }",
+                "kugutsu.opt.theme_overrides: unknown key 'foo'",
+            ),
+            (
+                r#"{ name = "x" }"#,
+                "kugutsu.opt.theme_overrides: unknown key 'name'",
+            ),
+        ] {
+            let config = eval_err(&format!("kugutsu.opt.theme_overrides = {value}"), expected);
+            assert_eq!(config.theme, Theme::default());
+        }
+    }
+
+    #[test]
+    fn theme_overrides_can_be_read_back() {
+        eval_ok("assert(kugutsu.opt.theme_overrides == nil)");
+        eval_ok(
+            r##"kugutsu.opt.theme_overrides = {
+                terminal = { cursor = "#ABCDEF", ansi = { "#000000", "#000001", "#000002", "#000003",
+                    "#000004", "#000005", "#000006", "#000007", "#000008", "#000009", "#00000a",
+                    "#00000b", "#00000c", "#00000d", "#00000e", "#00000f" } },
+                ui = { error = "#010203" },
+            }
+            local o = kugutsu.opt.theme_overrides
+            assert(o.terminal.cursor == "#abcdef")
+            assert(o.terminal.foreground == nil)
+            assert(#o.terminal.ansi == 16 and o.terminal.ansi[16] == "#00000f")
+            assert(o.ui.error == "#010203")
+            assert(o.ui.bar_border == nil)
+            -- 読み出した table を代入し直せる
+            kugutsu.opt.theme_overrides = o"##,
         );
     }
 

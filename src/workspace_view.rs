@@ -1871,6 +1871,34 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn panes_use_theme_overrides_from_init_lua(cx: &mut TestAppContext) {
+        let config = crate::config::evaluate(
+            r##"kugutsu.opt.theme = "kugutsu-light"
+            kugutsu.opt.theme_overrides = {
+                terminal = { background = "#010203" },
+                ui = { active_pane_border = "#040506" },
+            }"##,
+            "init.lua",
+        );
+        assert_eq!(config.errors, Vec::<String>::new());
+        let (workspace, cx) = open_workspace_with_config(cx, sleep_options(), config);
+        cx.simulate_keystrokes("ctrl-b c");
+        workspace.read_with(cx, |workspace, cx| {
+            let view = workspace
+                .active_tab()
+                .and_then(Tab::active_view)
+                .unwrap()
+                .read(cx);
+            assert_eq!(view.colors().background, 0x010203);
+            assert_eq!(view.colors().foreground, light().terminal.foreground);
+            assert_eq!(
+                pane_border_color(&workspace.config.theme, true),
+                rgb(0x040506)
+            );
+        });
+    }
+
     /// シェルの代わりに終了しない軽いプログラムを動かすワークスペースを開く。
     fn open_workspace(cx: &mut TestAppContext) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
         open_workspace_with(cx, sleep_options())

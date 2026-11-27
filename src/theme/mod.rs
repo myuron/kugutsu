@@ -247,6 +247,10 @@ macro_rules! ui_patch {
                 }
             }
 
+            fn entries(&self) -> Vec<(&'static str, Option<u32>)> {
+                vec![$((stringify!($key), self.$key)),*]
+            }
+
             fn complete(&self) -> Result<UiColors, String> {
                 Ok(UiColors {
                     $($key: self
@@ -361,6 +365,43 @@ impl Theme {
         }
         patch.ui.apply_to(&mut self.ui);
     }
+}
+
+impl ThemePatch {
+    /// [`patch`] で読める Lua の table に戻す。色は `"#rrggbb"`。
+    pub fn to_lua(&self, lua: &Lua) -> mlua::Result<Table> {
+        let hex = |color: u32| format!("#{color:06x}");
+        let terminal = lua.create_table()?;
+        let colors = &self.terminal;
+        for (key, color) in [
+            ("foreground", colors.foreground),
+            ("background", colors.background),
+            ("cursor", colors.cursor),
+        ] {
+            if let Some(color) = color {
+                terminal.raw_set(key, hex(color))?;
+            }
+        }
+        if let Some(ansi) = colors.ansi {
+            terminal.raw_set("ansi", lua.create_sequence_from(ansi.map(hex))?)?;
+        }
+        let ui = lua.create_table()?;
+        for (key, color) in self.ui.entries() {
+            if let Some(color) = color {
+                ui.raw_set(key, hex(color))?;
+            }
+        }
+        let root = lua.create_table()?;
+        root.raw_set("terminal", terminal)?;
+        root.raw_set("ui", ui)?;
+        Ok(root)
+    }
+}
+
+/// `kugutsu.opt.theme_overrides` の table を読む。テーマと違い `name` は書けない。
+pub fn overrides(value: &Value) -> Result<ThemePatch, String> {
+    check_keys(&table(value)?, "", &["terminal", "ui"])?;
+    patch(value)
 }
 
 /// 必須の色が揃った `patch` をテーマにする。派生の色は省略されていれば導出する。

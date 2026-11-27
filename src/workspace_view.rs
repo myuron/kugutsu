@@ -4,10 +4,10 @@
 use alacritty_terminal::event::Event;
 use futures::channel::mpsc::UnboundedReceiver;
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Context, ElementId, Entity, Focusable, FontWeight,
-    KeyDownEvent, MouseButton, Render, Rgba, ScrollHandle, SharedString, Stateful, Subscription,
-    Svg, Task, Transformation, Window, div, percentage, point, prelude::*, pulsating_between, px,
-    rgb, rgba, svg,
+    Animation, AnimationExt, AnyElement, App, BoxShadow, Context, ElementId, Entity, Focusable,
+    FontWeight, KeyDownEvent, MouseButton, Render, Rgba, ScrollHandle, SharedString, Stateful,
+    Subscription, Svg, Task, Transformation, Window, div, percentage, point, prelude::*,
+    pulsating_between, px, rgb, rgba, svg,
 };
 
 use std::time::Duration;
@@ -49,6 +49,10 @@ const BAR_ITEM_GAP: f32 = 4.0;
 const BAR_ITEM_RADIUS: f32 = 6.0;
 /// バーの項目とボタンの高さ（ボタンは正方形）。
 const BAR_BUTTON_SIZE: f32 = 24.0;
+/// ペインの間とペイン領域の縁の余白、ペインの角丸、ペインの内側の余白。
+const PANE_GAP: f32 = 6.0;
+const PANE_RADIUS: f32 = 8.0;
+const PANE_PADDING: f32 = 6.0;
 const STATUS_LINE_HEIGHT: f32 = 22.0;
 const SIDEBAR_WIDTH: f32 = 260.0;
 /// Agent の状態を調べる間隔。
@@ -587,9 +591,10 @@ impl WorkspaceView {
     fn render_panes(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let panes = &self.active_tab()?.panes;
         let root = panes.root()?;
-        // ペインが 1 つだけなら枠で強調する必要は無い
+        // ペインが 1 つだけなら強調も減光もしない
         let highlight = matches!(root, Node::Split { .. }).then_some(panes.active_id());
-        Some(render_node(root, highlight, &self.config, cx))
+        let order: Vec<PaneId> = panes.iter().map(|(id, _)| id).collect();
+        Some(render_node(root, highlight, &order, &self.config, cx))
     }
 
     /// 全 workspace・全タブ・全ペインで動いている Agent を workspace ごとにまとめる。
@@ -1047,22 +1052,54 @@ impl WorkspaceView {
     }
 }
 
-/// ペイン木の節を描画する。分割は子を均等な大きさで並べ、間に境界線を引く。
-/// `highlight` が指すペインは枠で強調する。
+/// 分割の中でのペインの立場。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneState {
+    /// 分割されていない、ただ 1 つのペイン。
+    Only,
+    Active,
+    Inactive,
+}
+
+/// ペイン木の節を描画する。分割は子を均等な大きさで並べ、間を少し空ける。
+/// `highlight` が指すペインは枠とグローで強調し、ほかのペインは薄くする。
+/// `order` はペインを左上から並べた順で、デバッグ用セレクタ `pane-{n}` の番号に使う。
 fn render_node(
     node: &Node<Pane>,
     highlight: Option<PaneId>,
+    order: &[PaneId],
     config: &Config,
     cx: &mut Context<WorkspaceView>,
 ) -> AnyElement {
     match node {
         Node::Leaf { id, item } => {
             let id = *id;
+            let number = order.iter().position(|&candidate| candidate == id);
+            let state = match highlight {
+                None => PaneState::Only,
+                Some(active) if active == id => PaneState::Active,
+                Some(_) => PaneState::Inactive,
+            };
+            let theme = &config.theme;
             div()
+                .when_some(number, |pane, number| {
+                    pane.debug_selector(move || format!("pane-{number}"))
+                })
                 .size_full()
-                .when_some(highlight, |pane, active| {
-                    pane.border_1()
-                        .border_color(pane_border_color(&config.theme, id == active))
+                .p(px(PANE_PADDING))
+                .overflow_hidden()
+                .rounded(px(PANE_RADIUS))
+                .border_1()
+                .border_color(pane_border_color(theme, state == PaneState::Active))
+                .bg(config.translucent(theme.terminal.background))
+                .opacity(pane_opacity(config, state))
+                .when(state == PaneState::Active, |pane| {
+                    pane.shadow(vec![BoxShadow {
+                        color: with_alpha(theme.ui.accent, 0.18).into(),
+                        offset: point(px(0.0), px(0.0)),
+                        blur_radius: px(12.0),
+                        spread_radius: px(0.0),
+                    }])
                 })
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1072,19 +1109,12 @@ fn render_node(
                 .into_any_element()
         }
         Node::Split { axis, children } => {
-            let mut container = div().size_full().flex();
+            let mut container = div().size_full().flex().gap(px(PANE_GAP));
             container = match axis {
                 Axis::Horizontal => container.flex_row(),
                 Axis::Vertical => container.flex_col(),
             };
-            for (index, child) in children.iter().enumerate() {
-                if index > 0 {
-                    let separator = div().flex_none().bg(rgb(config.theme.ui.bar_border));
-                    container = container.child(match axis {
-                        Axis::Horizontal => separator.w(px(1.0)),
-                        Axis::Vertical => separator.h(px(1.0)),
-                    });
-                }
+            for child in children {
                 container = container.child(
                     // 中身の大きさに引きずられず均等に分けるため、基準サイズ 0 から伸ばす
                     div()
@@ -1092,8 +1122,7 @@ fn render_node(
                         .flex_basis(px(0.0))
                         .min_w(px(0.0))
                         .min_h(px(0.0))
-                        .overflow_hidden()
-                        .child(render_node(child, highlight, config, cx)),
+                        .child(render_node(child, highlight, order, config, cx)),
                 );
             }
             container.into_any_element()
@@ -1133,7 +1162,8 @@ impl Render for WorkspaceView {
                                     .debug_selector(|| "panes".into())
                                     .bg(self
                                         .config
-                                        .translucent(self.config.theme.terminal.background))
+                                        .translucent(self.config.theme.ui.bar_background))
+                                    .p(px(PANE_GAP))
                                     .flex_1()
                                     .min_h(px(0.0))
                                     .overflow_hidden()
@@ -1383,12 +1413,20 @@ fn state_color(ui: &UiColors, state: AgentState) -> u32 {
     }
 }
 
-/// 分割時のペインの枠の色。アクティブなペインだけを目立たせ、ほかは透明にする。
+/// ペインの枠の色。分割時のアクティブなペインだけを目立たせる。
 fn pane_border_color(theme: &Theme, active: bool) -> Rgba {
-    if active {
-        rgb(theme.ui.active_pane_border)
+    rgb(if active {
+        theme.ui.active_pane_border
     } else {
-        Rgba::default()
+        theme.ui.strong_border
+    })
+}
+
+/// ペインの不透明度。分割時に非アクティブなペインだけを薄くする。
+fn pane_opacity(config: &Config, state: PaneState) -> f32 {
+    match state {
+        PaneState::Inactive => config.inactive_pane_opacity,
+        PaneState::Active | PaneState::Only => 1.0,
     }
 }
 
@@ -1641,8 +1679,34 @@ mod tests {
             pane_border_color(&theme, true),
             rgb(theme.ui.active_pane_border)
         );
-        // 非アクティブな枠は透明にして、下のペイン領域の背景を見せる
-        assert_eq!(pane_border_color(&theme, false).a, 0.0);
+        assert_eq!(
+            pane_border_color(&theme, false),
+            rgb(theme.ui.strong_border)
+        );
+    }
+
+    #[test]
+    fn only_inactive_split_panes_are_dimmed() {
+        let config = Config {
+            inactive_pane_opacity: 0.6,
+            ..Config::default()
+        };
+        assert_eq!(pane_opacity(&config, PaneState::Inactive), 0.6);
+        assert_eq!(pane_opacity(&config, PaneState::Active), 1.0);
+        assert_eq!(pane_opacity(&config, PaneState::Only), 1.0);
+    }
+
+    #[gpui::test]
+    fn split_panes_are_separated_by_a_gap(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace(cx);
+        cx.simulate_keystrokes("ctrl-b v");
+        cx.run_until_parked();
+        let left = bounds(cx, "pane-0");
+        let right = bounds(cx, "pane-1");
+        assert_eq!(right.left() - left.right(), px(PANE_GAP));
+        assert_eq!(left.top(), right.top());
+        // ペイン領域の縁からも離す
+        assert_eq!(left.left() - bounds(cx, "panes").left(), px(PANE_GAP));
     }
 
     #[gpui::test]

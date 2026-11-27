@@ -31,6 +31,18 @@ pub fn choose_monospace_family(available: &[String]) -> Option<String> {
         .map(str::to_string)
 }
 
+/// ターミナルに使うフォント。設定された `configured` がインストールされていればそれを、
+/// 無ければ [`choose_monospace_family`] で選んだものを使う。
+pub fn resolve_family(configured: Option<&str>, available: &[String]) -> Option<String> {
+    if let Some(name) = configured {
+        if available.iter().any(|a| a == name) {
+            return Some(name.to_string());
+        }
+        eprintln!("warning: font_family {name:?} is not installed; using a fallback font");
+    }
+    choose_monospace_family(available)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,6 +82,30 @@ mod tests {
     fn does_not_pick_proportional_variants() {
         let available = names(&["JetBrainsMono Nerd Font Propo", "Noto Sans"]);
         assert_eq!(choose_monospace_family(&available), None);
+    }
+
+    #[test]
+    fn resolve_uses_configured_font_when_installed() {
+        let available = names(&["JetBrains Mono", "Fira Code"]);
+        assert_eq!(
+            resolve_family(Some("Fira Code"), &available).as_deref(),
+            Some("Fira Code")
+        );
+    }
+
+    #[test]
+    fn resolve_falls_back_when_configured_font_is_missing() {
+        let available = names(&["JetBrains Mono"]);
+        assert_eq!(
+            resolve_family(Some("Missing Font"), &available).as_deref(),
+            Some("JetBrains Mono")
+        );
+    }
+
+    #[test]
+    fn resolve_chooses_monospace_without_configuration() {
+        let available = names(&["Noto Sans", "Hack"]);
+        assert_eq!(resolve_family(None, &available).as_deref(), Some("Hack"));
     }
 
     #[test]

@@ -8,7 +8,6 @@ use gpui::{
     SharedString, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb, rgba,
 };
 
-use std::rc::Rc;
 use std::time::Duration;
 
 use crate::agents::AgentState;
@@ -103,7 +102,7 @@ pub struct WorkspaceView {
     workspace_scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
     /// ユーザー設定（`init.lua`）。
-    config: Rc<Config>,
+    config: Config,
     /// `init.lua` の読み込みで起きたエラー。ステータスラインに表示する。
     config_errors: Vec<String>,
     _agent_poll: Task<()>,
@@ -124,8 +123,7 @@ impl WorkspaceView {
             config,
             errors: config_errors,
         } = config;
-        let config = Rc::new(config);
-        let first = Self::create_pane(terminal, events, window, cx);
+        let first = Self::create_pane(terminal, events, &config, window, cx);
         let this = Self {
             workspaces: Tabs::new(Workspace::new(first)),
             keymap: PrefixKeymap::new(config.prefix.clone()),
@@ -196,10 +194,11 @@ impl WorkspaceView {
     fn create_pane(
         terminal: Terminal,
         events: UnboundedReceiver<Event>,
+        config: &Config,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Pane {
-        let view = cx.new(|cx| TerminalView::new(terminal, events, window, cx));
+        let view = cx.new(|cx| TerminalView::new(terminal, events, config, window, cx));
         let subscription = cx.subscribe_in(&view, window, Self::on_terminal_event);
         Pane {
             view,
@@ -215,7 +214,13 @@ impl WorkspaceView {
             .and_then(Tab::active_view)
             .map_or(INITIAL_SIZE, |view| view.read(cx).grid_size());
         match Terminal::spawn(self.spawn_options.clone(), size) {
-            Ok((terminal, events)) => Some(Self::create_pane(terminal, events, window, cx)),
+            Ok((terminal, events)) => Some(Self::create_pane(
+                terminal,
+                events,
+                &self.config,
+                window,
+                cx,
+            )),
             Err(err) => {
                 eprintln!("failed to start terminal: {err}");
                 None

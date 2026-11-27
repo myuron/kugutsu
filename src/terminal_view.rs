@@ -16,13 +16,13 @@ use gpui::{
 };
 
 use crate::agents::{self, AgentTracker};
+use crate::config::Config;
+use crate::font;
 use crate::terminal::content::{Cursor, Snapshot, Style};
 use crate::terminal::scroll::{self, Wheel, WheelAccumulator, WheelMode};
 use crate::terminal::size::GridSize;
 use crate::terminal::{Scroll, Terminal, TerminalEvent, colors, keys};
 
-const FONT_SIZE: f32 = 14.0;
-const LINE_HEIGHT_RATIO: f32 = 1.3;
 const PADDING: f32 = 4.0;
 const CURSOR_OPACITY: f32 = 0.6;
 /// 等幅フォントが見つからないときに gpui へ渡すファミリー名。
@@ -64,19 +64,20 @@ struct CellMetrics {
 }
 
 impl CellMetrics {
-    fn measure(window: &Window) -> Self {
+    fn measure(window: &Window, config: &Config) -> Self {
         let text_system = window.text_system();
-        let family = crate::font::choose_monospace_family(&text_system.all_font_names())
-            .unwrap_or_else(|| {
-                eprintln!("warning: no monospace font found; terminal cells may be misaligned");
-                FALLBACK_FONT_FAMILY.to_string()
-            });
+        let family =
+            font::resolve_family(config.font_family.as_deref(), &text_system.all_font_names())
+                .unwrap_or_else(|| {
+                    eprintln!("warning: no monospace font found; terminal cells may be misaligned");
+                    FALLBACK_FONT_FAMILY.to_string()
+                });
         let font = Font {
             // 合字（-> や != など）はセル格子を崩すので無効にする
             features: FontFeatures::disable_ligatures(),
             ..font(family)
         };
-        let font_size = px(FONT_SIZE);
+        let font_size = px(config.font_size);
         let font_id = text_system.resolve_font(&font);
         let cell_width = text_system
             .advance(font_id, font_size, 'm')
@@ -86,7 +87,7 @@ impl CellMetrics {
             font,
             font_size,
             cell_width,
-            cell_height: (font_size * LINE_HEIGHT_RATIO).round(),
+            cell_height: (font_size * config.line_height).round(),
         }
     }
 
@@ -104,6 +105,7 @@ impl TerminalView {
     pub fn new(
         terminal: Terminal,
         events: UnboundedReceiver<Event>,
+        config: &Config,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -118,7 +120,7 @@ impl TerminalView {
         Self {
             terminal,
             focus_handle,
-            metrics: CellMetrics::measure(window),
+            metrics: CellMetrics::measure(window, config),
             title: None,
             marked_text: None,
             agent: None,
@@ -785,6 +787,34 @@ mod tests {
         );
     }
 
+    mod config {
+        use super::*;
+        use crate::config::Config;
+        use crate::terminal::{SpawnOptions, Terminal};
+        use crate::workspace_view::INITIAL_SIZE;
+        use gpui::TestAppContext;
+
+        #[gpui::test]
+        fn uses_configured_font_size_and_line_height(cx: &mut TestAppContext) {
+            let options = SpawnOptions {
+                program: Some(("sleep".into(), vec!["30".into()])),
+            };
+            let (terminal, events) = Terminal::spawn(options, INITIAL_SIZE).unwrap();
+            let config = Config {
+                font_size: 20.0,
+                line_height: 1.5,
+                ..Config::default()
+            };
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                TerminalView::new(terminal, events, &config, window, cx)
+            });
+            view.read_with(cx, |view, _| {
+                assert_eq!(view.metrics.font_size, px(20.0));
+                assert_eq!(view.metrics.cell_height, px(30.0));
+            });
+        }
+    }
+
     mod scrolling {
         use super::ime::{open_script, wait_for_screen};
         use super::*;
@@ -911,8 +941,9 @@ mod tests {
                 program: Some(("sh".into(), vec!["-c".into(), script.into()])),
             };
             let (terminal, events) = Terminal::spawn(options, INITIAL_SIZE).unwrap();
-            let (view, cx) =
-                cx.add_window_view(|window, cx| TerminalView::new(terminal, events, window, cx));
+            let (view, cx) = cx.add_window_view(|window, cx| {
+                TerminalView::new(terminal, events, &Config::default(), window, cx)
+            });
             cx.update(|window, cx| window.focus(&view.focus_handle(cx)));
             wait_for_screen(&view, cx, "ready");
             (view, cx)

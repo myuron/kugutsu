@@ -92,6 +92,8 @@ kugutsu.opt.prefix = "ctrl-a"
 kugutsu.opt.font_family = "JetBrains Mono"
 kugutsu.opt.font_size = 14
 kugutsu.opt.line_height = 1.3
+kugutsu.opt.theme = "kugutsu-light"
+kugutsu.opt.background_opacity = 0.9
 ```
 
 | Option        | Type   | Default    | Description |
@@ -100,6 +102,9 @@ kugutsu.opt.line_height = 1.3
 | `font_family` | string | first installed font of a built-in monospace list | Terminal font. If it is not installed, the built-in list is used |
 | `font_size`   | number | `14`       | Terminal font size in pixels |
 | `line_height` | number | `1.3`      | Line height as a multiple of the font size |
+| `theme`       | string | `"kugutsu-dark"` | Color theme (see [Themes](#themes)) |
+| `background_opacity` | number | `1.0` | Opacity of the background, from `0.0` (fully transparent) to `1.0` (opaque) |
+| `background_blur` | boolean | `false` | Blur what is behind a translucent window |
 
 The following are errors:
 
@@ -108,7 +113,49 @@ The following are errors:
 - Values of the wrong type (e.g. `kugutsu.opt.font_size = "big"`)
 - A `prefix` that is not a valid keystroke, or an empty `font_family`
 - A `font_size` or `line_height` that is zero, negative, NaN or infinite
+- A `theme` that is not a bundled theme
+- A `background_opacity` outside `0.0`–`1.0`, or NaN
 
 Errors are shown on the right of the status line with the line number in `init.lua`, and Kugutsu keeps running. Options set before the error still apply; the rest keep their defaults.
 
-Colors and themes are not configurable yet.
+### Themes
+
+A theme sets the colors of the terminal and of the Kugutsu UI. Kugutsu bundles two themes:
+
+- `kugutsu-dark` (default)
+- `kugutsu-light`
+
+Select one with `kugutsu.opt.theme`. An unknown theme name is reported as an error and the default theme is used.
+
+A theme is a Lua file `colors/<name>.lua` that returns a table of colors written as `"#rrggbb"`. The bundled themes are in [`runtime/colors/`](runtime/colors/):
+
+```lua
+return {
+  terminal = {
+    foreground = "#d4d4d4",
+    background = "#1e1e1e",
+    cursor = "#aeafad",
+    -- 16 colors: black, red, green, yellow, blue, magenta, cyan, white, then the bright ones
+    ansi = { "#000000", "#cd3131", ... },
+  },
+  ui = {
+    bar_background = "#181818",      -- tab bars, sidebar and status line
+    bar_border = "#2b2b2b",          -- borders of the bars and pane separators
+    inactive_foreground = "#8a8a8a", -- inactive tabs and labels
+    active_pane_border = "#569cd6",  -- border around the active pane when split
+    prefix_indicator = "#dcdcaa",    -- prefix key in the status line
+    agent_working = "#569cd6",
+    agent_blocked = "#e5c07b",
+    agent_done = "#89d185",
+    error = "#f14c4c",               -- errors in the status line
+  },
+}
+```
+
+Every key is required. Loading your own themes and themes from plugins is not supported yet.
+
+### Background transparency
+
+`background_opacity` below `1.0` makes the window background translucent: the default background of the terminal and the UI bars become see-through. Cells with a background color set by the application and text stay opaque. With `background_blur = true`, Kugutsu also asks the compositor to blur what is behind the window.
+
+Whether transparency and blur work depends on the platform and the compositor (e.g. a Wayland compositor that supports it). Where they are not supported, the window stays opaque.

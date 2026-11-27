@@ -8,12 +8,14 @@ use gpui::{
     SharedString, Stateful, Subscription, Task, Window, div, point, prelude::*, px, rgb, rgba,
 };
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use crate::agents::AgentState;
+use crate::config::{Config, Loaded};
 use crate::panes::{Axis, Node, PaneId, Panes};
 use crate::tabs::Tabs;
-use crate::tabs::prefix::{Command, DEFAULT_PREFIX, KeyOutcome, PrefixKeymap, bindings};
+use crate::tabs::prefix::{Command, KeyOutcome, PrefixKeymap, bindings};
 use crate::terminal::size::GridSize;
 use crate::terminal::{SpawnOptions, Terminal, colors};
 use crate::terminal_view::{TerminalView, TerminalViewEvent};
@@ -40,6 +42,8 @@ const BAR_BACKGROUND: u32 = 0x181818;
 const BAR_BORDER: u32 = 0x2b2b2b;
 const INACTIVE_TAB_FOREGROUND: u32 = 0x8a8a8a;
 const PREFIX_INDICATOR: u32 = 0xdcdcaa;
+/// 設定（`init.lua`）のエラーの文字色。
+const CONFIG_ERROR_COLOR: u32 = 0xf14c4c;
 /// 分割時にアクティブなペインを囲む枠の色。
 const ACTIVE_PANE_BORDER: u32 = 0x569cd6;
 const SIDEBAR_WIDTH: f32 = 220.0;
@@ -98,6 +102,10 @@ pub struct WorkspaceView {
     /// workspace ライン・タブバーの横スクロール位置。
     workspace_scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
+    /// ユーザー設定（`init.lua`）。
+    config: Rc<Config>,
+    /// `init.lua` の読み込みで起きたエラー。ステータスラインに表示する。
+    config_errors: Vec<String>,
     _agent_poll: Task<()>,
 }
 
@@ -108,13 +116,21 @@ impl WorkspaceView {
         terminal: Terminal,
         events: UnboundedReceiver<Event>,
         spawn_options: SpawnOptions,
+        config: Loaded,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let Loaded {
+            config,
+            errors: config_errors,
+        } = config;
+        let config = Rc::new(config);
         let first = Self::create_pane(terminal, events, window, cx);
         let this = Self {
             workspaces: Tabs::new(Workspace::new(first)),
-            keymap: PrefixKeymap::default(),
+            keymap: PrefixKeymap::new(config.prefix.clone()),
+            config,
+            config_errors,
             spawn_options,
             sidebar_visible: true,
             keymap_help_visible: false,
@@ -622,9 +638,28 @@ impl WorkspaceView {
                 line.child(
                     div()
                         .text_color(rgb(PREFIX_INDICATOR))
-                        .child(DEFAULT_PREFIX),
+                        .child(self.prefix_label()),
                 )
             })
+            .children(self.config_error_message().map(|message| {
+                div()
+                    .debug_selector(|| "config-error".into())
+                    .ml_auto()
+                    .min_w(px(0.0))
+                    .truncate()
+                    .text_color(rgb(CONFIG_ERROR_COLOR))
+                    .child(message)
+            }))
+    }
+
+    /// 表示用の prefix キー（gpui の表記）。
+    fn prefix_label(&self) -> String {
+        self.keymap.prefix().unparse()
+    }
+
+    /// ステータスラインに出す設定のエラー。エラーが無ければ `None`。
+    fn config_error_message(&self) -> Option<String> {
+        config_error_message(&self.config_errors)
     }
 
     /// prefix 入力待ちのとき、ステータスラインのすぐ上に重ねて出す次のキーの候補
@@ -673,6 +708,7 @@ impl WorkspaceView {
 
     /// ウィンドウ全体に重ねるキーマップ一覧。背景をクリックすると閉じる。
     fn render_keymap_help(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let prefix = self.prefix_label();
         let rows = bindings().into_iter().map(|(key, description)| {
             div()
                 .flex()
@@ -682,7 +718,7 @@ impl WorkspaceView {
                         .w(px(KEYMAP_KEY_COLUMN_WIDTH))
                         .flex_none()
                         .text_color(rgb(PREFIX_INDICATOR))
-                        .child(format!("{DEFAULT_PREFIX} {key}")),
+                        .child(format!("{prefix} {key}")),
                 )
                 .child(
                     div()
@@ -939,6 +975,16 @@ fn state_color(state: AgentState) -> u32 {
     }
 }
 
+/// 設定のエラーの表示。最初のエラーを出し、ほかにもあれば件数を添える。
+fn config_error_message(errors: &[String]) -> Option<String> {
+    let (first, rest) = errors.split_first()?;
+    Some(if rest.is_empty() {
+        first.clone()
+    } else {
+        format!("{first} (+{})", rest.len())
+    })
+}
+
 /// タブバーに表示する名前（番号は prefix + 数字キーで選ぶときの番号）。
 fn tab_label(index: usize, title: Option<&str>) -> String {
     format!("{}: {}", index + 1, title.unwrap_or(UNTITLED_TAB))
@@ -974,10 +1020,77 @@ mod tests {
         cx: &mut TestAppContext,
         first: SpawnOptions,
     ) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
+        open_workspace_with_config(cx, first, Loaded::default())
+    }
+
+    fn open_workspace_with_config(
+        cx: &mut TestAppContext,
+        first: SpawnOptions,
+        config: Loaded,
+    ) -> (Entity<WorkspaceView>, &mut VisualTestContext) {
         let (terminal, events) = Terminal::spawn(first, INITIAL_SIZE).unwrap();
         cx.add_window_view(|window, cx| {
-            WorkspaceView::new(terminal, events, sleep_options(), window, cx)
+            WorkspaceView::new(terminal, events, sleep_options(), config, window, cx)
         })
+    }
+
+    /// `init.lua` の内容から設定を読み込んでワークスペースを開く。
+    fn open_workspace_with_init_lua<'a>(
+        cx: &'a mut TestAppContext,
+        init_lua: &str,
+    ) -> (Entity<WorkspaceView>, &'a mut VisualTestContext) {
+        let config = crate::config::evaluate(init_lua, crate::config::FILE_NAME);
+        open_workspace_with_config(cx, sleep_options(), config)
+    }
+
+    #[gpui::test]
+    fn configured_prefix_drives_commands(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(cx, r#"kugutsu.opt.prefix = "ctrl-a""#);
+        cx.simulate_keystrokes("ctrl-b c");
+        assert_eq!(active_tab_count(&workspace, cx), 1);
+        cx.simulate_keystrokes("ctrl-a c");
+        assert_eq!(active_tab_count(&workspace, cx), 2);
+    }
+
+    #[gpui::test]
+    fn configured_prefix_is_shown(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(cx, r#"kugutsu.opt.prefix = "ctrl-a""#);
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.prefix_label()),
+            "ctrl-a"
+        );
+        cx.simulate_keystrokes("ctrl-a");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("which-key").is_some());
+    }
+
+    #[gpui::test]
+    fn config_errors_are_shown_in_status_line(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(cx, "kugutsu.opt.foo = 1");
+        cx.run_until_parked();
+        let error = bounds(cx, "config-error");
+        assert!(bounds(cx, "status-line").contains(&error.center()));
+        let message = workspace.read_with(cx, |workspace, _| workspace.config_error_message());
+        assert_eq!(message.as_deref(), Some("init.lua:1: unknown option 'foo'"));
+    }
+
+    #[gpui::test]
+    fn no_config_error_without_errors(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace(cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("config-error").is_none());
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.config_error_message()),
+            None
+        );
+    }
+
+    #[test]
+    fn config_error_message_counts_extra_errors() {
+        let errors = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(config_error_message(&errors).as_deref(), Some("a (+2)"));
+        assert_eq!(config_error_message(&errors[..1]).as_deref(), Some("a"));
+        assert_eq!(config_error_message(&[]), None);
     }
 
     /// シェルの代わりに終了しない軽いプログラムを動かすワークスペースを開く。

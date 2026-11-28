@@ -305,7 +305,8 @@ fn prepare(lua: &Lua, state: &SharedState, paths: Option<&Paths>) -> mlua::Resul
     })?;
     let json_decode =
         lua.create_function(|lua, text: Value| Ok(split(json::decode(lua, &text))))?;
-    let json_encode = lua.create_function(|_, value: Value| Ok(split(json::encode(&value))))?;
+    let json_encode =
+        lua.create_function(|lua, value: Value| Ok(split(json::encode(lua, &value))))?;
     let json_array =
         lua.create_function(|lua, value: Value| Ok(split(json::array(lua, &value))))?;
     lua.load(PRELUDE).set_name("=prelude").call::<()>((
@@ -1340,6 +1341,64 @@ mod tests {
             assert(json.encode({ 1, json.null, 3 }) == "[1,null,3]")
             assert(json.encode("a\"b") == '"a\\"b"')
             assert(json.encode(true) == "true")"#,
+        );
+    }
+
+    #[test]
+    fn json_encode_keeps_every_key_of_mixed_tables() {
+        eval_ok(
+            r#"local json = kugutsu.json
+            assert(json.encode({ 1, 2, name = "x" }) == '{"1":1,"2":2,"name":"x"}')
+            assert(json.encode(table.pack(1, 2)) == '{"1":1,"2":2,"n":2}')
+            assert(json.encode({ [1] = "a", [3] = "c" }) == '["a",null,"c"]')"#,
+        );
+    }
+
+    #[test]
+    fn json_encode_rejects_arrays_with_other_keys() {
+        eval_err(
+            "local t = kugutsu.json.decode('[1]')\nt.name = 'x'\nkugutsu.json.encode(t)",
+            "init.lua:3: kugutsu.json.encode: array has a key outside 1..#t: \"name\"",
+        );
+        eval_err(
+            "kugutsu.json.encode({ list = kugutsu.json.array({ [2] = 1 }) })",
+            "init.lua:1: kugutsu.json.encode: array has a key outside 1..#t: 2",
+        );
+    }
+
+    #[test]
+    fn json_encode_rejects_nan_and_infinity() {
+        for value in [
+            "0/0",
+            "math.huge",
+            "-math.huge",
+            "{ cost = 0/0 }",
+            "{ 1, math.huge }",
+        ] {
+            eval_err(
+                &format!("kugutsu.json.encode({value})"),
+                "init.lua:1: kugutsu.json.encode: cannot encode NaN or infinity",
+            );
+        }
+    }
+
+    #[test]
+    fn json_encode_rejects_tables_it_cannot_represent() {
+        eval_err(
+            "kugutsu.json.encode({ [true] = 1 })",
+            "init.lua:1: kugutsu.json.encode: cannot encode a table key of type boolean",
+        );
+        eval_err(
+            "local t = {}\nfor _ = 1, 200 do t = { t } end\nkugutsu.json.encode(t)",
+            "init.lua:3: kugutsu.json.encode: nested too deeply",
+        );
+    }
+
+    #[test]
+    fn json_encode_allows_shared_tables() {
+        eval_ok(
+            r#"local shared = { 1 }
+            assert(kugutsu.json.encode({ a = shared, b = shared }) == '{"a":[1],"b":[1]}')"#,
         );
     }
 

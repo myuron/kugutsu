@@ -452,8 +452,9 @@ kugutsu.json.encode({ b = { 1, 2 }, a = 1 }) -- '{"a":1,"b":[1,2]}' (keys are so
 ```
 
 - JSON `null` becomes `kugutsu.json.null`, so arrays keep their length: `#kugutsu.json.decode("[1,null,3]") == 3`.
-- An empty table encodes as `{}`. Wrap it with `kugutsu.json.array(t)` to encode it as `[]`. Arrays returned by `decode` are already marked, so `[]` stays `[]`.
-- Invalid JSON and values that cannot be encoded (functions, userdata, tables that contain themselves) raise an error. Use `pcall` to handle it.
+- A table whose keys are all positive integers encodes as an array (gaps become `null`). Any other table encodes as an object, with number keys turned into strings: `{ 1, 2, n = 2 }` gives `{"1":1,"2":2,"n":2}`, so no key is dropped.
+- An empty table encodes as `{}`. Wrap it with `kugutsu.json.array(t)` to encode it as `[]`. Arrays returned by `decode` are already marked, so `[]` stays `[]`. A marked table with keys outside `1..#t` is an error.
+- Invalid JSON and values that cannot be encoded (NaN and infinity, functions, userdata, tables that contain themselves) raise an error. Use `pcall` to handle it.
 
 ### External plugins (Nix)
 

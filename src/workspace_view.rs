@@ -2167,7 +2167,7 @@ mod tests {
         workspace.read_with(cx, |w, _| w.active_tabs().unwrap().iter().count())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[gpui::test]
     fn clicking_agent_in_sidebar_focuses_its_tab(cx: &mut TestAppContext) {
         let (workspace, cx) = open_workspace_with(cx, fake_claude());
@@ -2186,7 +2186,7 @@ mod tests {
         assert_eq!(active_position(&workspace, cx), (0, 0));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[gpui::test]
     fn clicking_agent_in_other_workspace_switches_to_it(cx: &mut TestAppContext) {
         let (workspace, cx) = open_workspace_with(cx, fake_claude());

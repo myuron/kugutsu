@@ -450,7 +450,7 @@ mod tests {
         assert_eq!(terminal.wheel_mode(), WheelMode::Report { sgr: true });
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn reports_foreground_process() {
         let (terminal, _events) = Terminal::spawn(sh("exec sleep 5"), SIZE).unwrap();

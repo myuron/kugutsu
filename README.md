@@ -31,7 +31,7 @@ Kugutsu runs on Linux (x86_64) and macOS (Apple Silicon).
 nix run github:myuron/kugutsu
 ```
 
-On macOS, `nix build` also produces `result/Applications/Kugutsu.app`, which you can open from Finder or copy to `/Applications`.
+On macOS, the package also contains `Applications/Kugutsu.app`. The app runs the binary in the Nix store, so do not copy it out of the store: install it with `nix profile install github:myuron/kugutsu` or home-manager, which links it into your applications, or open `result/Applications/Kugutsu.app` after `nix build`.
 
 ### Build from source
 

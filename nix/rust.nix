@@ -15,7 +15,7 @@
 }:
 let
   inherit (stdenv.hostPlatform) isLinux isDarwin;
-  version = "0.1.0";
+  inherit ((lib.importTOML ../Cargo.toml).package) version;
   toolchain = rust-bin.stable.latest.default;
   rustPlatform = makeRustPlatform {
     cargo = toolchain;
@@ -91,7 +91,7 @@ rustPlatform.buildRustPackage {
       substitute assets/Info.plist ${app}/Info.plist --subst-var version
 
       iconset=$(mktemp -d)
-      for size in 16 32 128 256 512; do
+      for size in 16 32 128 256 512 1024; do
         magick assets/kugutsu.png -resize ''${size}x''${size} $iconset/$size.png
       done
       mkdir -p ${app}/Resources

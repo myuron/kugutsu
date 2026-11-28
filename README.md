@@ -460,6 +460,27 @@ kugutsu.json.encode({ b = { 1, 2 }, a = 1 }) -- '{"a":1,"b":[1,2]}' (keys are so
 - An empty table encodes as `{}`. Wrap it with `kugutsu.json.array(t)` to encode it as `[]`. Arrays returned by `decode` are already marked, so `[]` stays `[]`. A marked table with keys outside `1..#t` is an error.
 - Invalid JSON and values that cannot be encoded (NaN and infinity, functions, userdata, tables that contain themselves) raise an error. Use `pcall` to handle it.
 
+### Sidebar
+
+`kugutsu.sidebar` shows sections in a sidebar on the right of the window, e.g. today's cost from ccusage. The left sidebar stays dedicated to agents.
+
+```lua
+kugutsu.sidebar.set("ccusage", { title = "USAGE", lines = { "Today  $1.23" } })
+
+-- Plugins do not need to map keys; map the toggle yourself
+kugutsu.keymap.set("<prefix>u", function()
+  kugutsu.sidebar.toggle("ccusage")
+end, { desc = "Toggle usage" })
+```
+
+- `kugutsu.sidebar.set(id, { title = "...", lines = { "...", ... } })` adds a section, or replaces the one with the same `id`. Both `title` and `lines` are required.
+- `kugutsu.sidebar.del(id)` removes a section.
+- `kugutsu.sidebar.toggle(id)` hides or shows a section without losing its content. `kugutsu.sidebar.show(id)` and `kugutsu.sidebar.hide(id)` set it explicitly. A hidden section keeps receiving `set` updates and shows the latest lines when shown again.
+- They can be called anywhere: while `init.lua` is evaluated, from mapped functions and from callbacks. Unlike `kugutsu.action`, they apply immediately.
+- Sections are listed in the order they were first set. The right sidebar is not shown when no section is visible.
+- An `id` that is not a non-empty string, a `title` that is not a string, `lines` that is not a list of strings, unknown keys, and `del` / `toggle` / `show` / `hide` with an unknown `id` are errors.
+- `reload_config` clears the sections, and `init.lua` and the plugins set them again. A section hidden before the reload stays hidden when the same `id` is set again.
+
 ### External plugins (Nix)
 
 A symlink or a directory without `.git` under `$XDG_DATA_HOME/kugutsu/plugins/` is **external**: `kugutsu install` never clones, checks out or removes it, and Kugutsu loads it like any other plugin when its name is in the spec. This way plugins can be provided from the Nix store, and the same `init.lua` works on machines with and without Nix.

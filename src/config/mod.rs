@@ -5,6 +5,7 @@
 
 mod json;
 mod lua;
+mod sidebar;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

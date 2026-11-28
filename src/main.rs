@@ -5,6 +5,7 @@ mod font;
 mod icons;
 mod panes;
 mod plugins;
+mod sidebar;
 mod tabs;
 mod terminal;
 mod terminal_view;

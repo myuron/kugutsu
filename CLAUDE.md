@@ -11,7 +11,7 @@
 
 ## 開発環境
 
-- ビルドに必要なツールとライブラリ（Rust ツールチェイン、wayland・vulkan など gpui の依存）は Nix の devShell（`flake.nix`）で用意している
+- 対応する system は `x86_64-linux` と `aarch64-darwin`。ビルドに必要なツールとライブラリ（Rust ツールチェイン、gpui の依存。Linux は wayland・vulkan など、macOS は Apple SDK）は Nix の devShell（`flake.nix`）で用意している
 - 普段は direnv（`.envrc`）が devShell を読み込むが、Claude Code の Bash ツールは direnv を通らない。そのため `cargo` などのビルド・テスト・lint は必ず `nix develop --command` を付けて実行する
   - 例: `nix develop --command cargo test --all-targets`
   - 付けずに実行するとリンクエラーになる

@@ -7,8 +7,12 @@ on:
 
 jobs:
   nix:
-    name: nix flake check & build
-    runs-on: ubuntu-latest
+    name: nix flake check & build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
@@ -18,8 +22,12 @@ jobs:
         run: nix build --print-build-logs
 
   cargo:
-    name: cargo fmt / clippy / test
-    runs-on: ubuntu-latest
+    name: cargo fmt / clippy / test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31

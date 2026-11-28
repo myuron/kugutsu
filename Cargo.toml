@@ -15,6 +15,10 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.2.3"
 
+# Nix のサンドボックスには `xcrun metal` が無いので、Metal シェーダーは実行時にコンパイルする
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+
 [dev-dependencies]
 # gpui のビューを TestAppContext / VisualTestContext でテストするため
 gpui = { version = "0.2.2", features = ["test-support"] }

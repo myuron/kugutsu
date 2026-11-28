@@ -23,15 +23,19 @@ It is a terminal workspace for running coding agents side by side:
 
 ## Quick Start
 
+Kugutsu runs on Linux (x86_64) and macOS (Apple Silicon).
+
 ### Run with Nix
 
 ```sh
 nix run github:myuron/kugutsu
 ```
 
+On macOS, `nix build` also produces `result/Applications/Kugutsu.app`, which you can open from Finder or copy to `/Applications`.
+
 ### Build from source
 
-The Rust toolchain and the libraries gpui depends on (Wayland, Vulkan, …) are provided by the Nix devShell.
+The Rust toolchain and the libraries gpui depends on (Wayland and Vulkan on Linux, the Apple SDK on macOS) are provided by the Nix devShell.
 
 ```sh
 git clone https://github.com/myuron/kugutsu.git
@@ -45,7 +49,7 @@ Inside the devShell, `KUGUTSU_CONFIG` points to `examples/config/kugutsu/init.lu
 
 ## Default Keybind
 
-Kugutsu uses a tmux-style prefix key. Press the prefix `Ctrl-b`, then press one of the keys below. While the prefix is pressed, the keys that can follow it are listed above the status line.
+Kugutsu uses a tmux-style prefix key. Press the prefix `Ctrl-b`, then press one of the keys below. While the prefix is pressed, the keys that can follow it are listed above the status line. The keys are the same on macOS: the prefix is `Ctrl-b`, not `Cmd-b`.
 
 | Key               | Action                    |
 | ----------------- | ------------------------- |

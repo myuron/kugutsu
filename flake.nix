@@ -25,6 +25,7 @@
       ];
       systems = [
         "x86_64-linux"
+        "aarch64-darwin"
       ];
       flake = {
         homeManagerModules.default = import ./nix/home-manager.nix { inherit self; };
@@ -56,19 +57,24 @@
             let
               gpuiDeps = pkgs.callPackage ./nix/gpui-deps.nix { };
             in
-            pkgs.mkShell {
-              packages = [
-                pkgs.rust-bin.stable.latest.default
-                pkgs.git
-              ]
-              ++ gpuiDeps.nativeBuildInputs;
-              buildInputs = gpuiDeps.buildInputs;
-              LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath gpuiDeps.runtimeLibs;
-              # 開発中の `cargo run` ではリポジトリのサンプル設定を読む
-              shellHook = ''
-                export KUGUTSU_CONFIG="$PWD/examples/config/kugutsu/init.lua"
-              '';
-            };
+            pkgs.mkShell (
+              {
+                packages = [
+                  pkgs.rust-bin.stable.latest.default
+                  pkgs.git
+                ]
+                ++ gpuiDeps.nativeBuildInputs;
+                buildInputs = gpuiDeps.buildInputs;
+                # 開発中の `cargo run` ではリポジトリのサンプル設定を読む
+                shellHook = ''
+                  export KUGUTSU_CONFIG="$PWD/examples/config/kugutsu/init.lua"
+                '';
+              }
+              # wayland / vulkan は dlopen されるので、実行時に見えるようにする（Linux のみ）
+              // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+                LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath gpuiDeps.runtimeLibs;
+              }
+            );
         };
       };
     };

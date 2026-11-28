@@ -1,5 +1,6 @@
 {
   lib,
+  stdenv,
   callPackage,
   makeRustPlatform,
   makeWrapper,
@@ -12,6 +13,7 @@
   desktop-file-utils,
 }:
 let
+  inherit (stdenv.hostPlatform) isLinux;
   toolchain = rust-bin.stable.latest.default;
   rustPlatform = makeRustPlatform {
     cargo = toolchain;
@@ -36,7 +38,7 @@ rustPlatform.buildRustPackage {
 
   # ランチャー向けのデスクトップエントリとアイコン。元の PNG（1254x1254）は hicolor の
   # 標準サイズではないので、ビルド時に縮小して置く
-  postInstall = ''
+  postInstall = lib.optionalString isLinux ''
     install -Dm644 assets/kugutsu.desktop $out/share/applications/kugutsu.desktop
     for size in 256 512; do
       dir=$out/share/icons/hicolor/''${size}x''${size}/apps
@@ -46,22 +48,29 @@ rustPlatform.buildRustPackage {
   '';
 
   doInstallCheck = true;
-  nativeInstallCheckInputs = [ desktop-file-utils ];
+  nativeInstallCheckInputs = lib.optionals isLinux [ desktop-file-utils ];
   installCheckPhase = ''
     runHook preInstallCheck
+  ''
+  + lib.optionalString isLinux ''
     desktop-file-validate $out/share/applications/kugutsu.desktop
+  ''
+  + ''
     runHook postInstallCheck
   '';
 
-  # wayland / vulkan は dlopen されるので rpath に追加する。
+  # wayland / vulkan は dlopen されるので rpath に追加する（Linux のみ）。
   # プラグインの取得に使う git は PATH の最後に足し、ユーザーの git と ~/.gitconfig を優先する
-  postFixup = ''
-    patchelf --add-rpath ${
-      lib.makeLibraryPath [
-        wayland
-        vulkan-loader
-      ]
-    } $out/bin/kugutsu
-    wrapProgram $out/bin/kugutsu --suffix PATH : ${lib.makeBinPath [ git ]}
-  '';
+  postFixup =
+    lib.optionalString isLinux ''
+      patchelf --add-rpath ${
+        lib.makeLibraryPath [
+          wayland
+          vulkan-loader
+        ]
+      } $out/bin/kugutsu
+    ''
+    + ''
+      wrapProgram $out/bin/kugutsu --suffix PATH : ${lib.makeBinPath [ git ]}
+    '';
 }

@@ -28,7 +28,7 @@ let
         module
         {
           home.username = "test";
-          home.homeDirectory = "/home/test";
+          home.homeDirectory = if pkgs.stdenv.hostPlatform.isDarwin then "/Users/test" else "/home/test";
           home.stateVersion = "25.05";
           programs.kugutsu = kugutsu;
         }

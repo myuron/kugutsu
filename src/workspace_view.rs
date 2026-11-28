@@ -2117,7 +2117,11 @@ mod tests {
 
     /// `claude` という名前で動く（Claude Code として検出される）偽の Agent。
     fn fake_claude() -> SpawnOptions {
-        let dir = std::env::temp_dir().join(format!("kugutsu-test-{}", std::process::id()));
+        // テストは並行に動くので、呼ぶたびに別のディレクトリを使う。動いているバイナリを
+        // 別のテストが上書きすると、macOS では署名が壊れてプロセスが kill される
+        static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("kugutsu-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let program = dir.join("claude");
         let args = write_fake_claude(&program);

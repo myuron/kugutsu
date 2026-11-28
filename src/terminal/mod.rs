@@ -453,15 +453,27 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn reports_foreground_process() {
-        let (terminal, _events) = Terminal::spawn(sh("exec sleep 5"), SIZE).unwrap();
+        // macOS はプロセス名に symlink を解決した後の名前を使う。Nix の coreutils の `sleep` は
+        // `coreutils` への symlink なので、symlink ではない `/bin/sleep` を使う（NixOS には無い）
+        let sleep = if cfg!(target_os = "macos") {
+            "/bin/sleep"
+        } else {
+            "sleep"
+        };
+        let (terminal, _events) = Terminal::spawn(sh(&format!("exec {sleep} 5")), SIZE).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut last = None;
         loop {
             let process = terminal.foreground_process();
-            if let Some(process) = process.filter(|p| p.comm == "sleep") {
-                assert_eq!(process.argv, ["sleep", "5"]);
+            if let Some(process) = process.clone().filter(|p| p.comm == "sleep") {
+                assert_eq!(process.argv, [sleep, "5"]);
                 break;
             }
-            assert!(Instant::now() < deadline, "sleep never became foreground");
+            last = process.or(last);
+            assert!(
+                Instant::now() < deadline,
+                "sleep never became foreground (last seen: {last:?})"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
     }

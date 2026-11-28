@@ -8,10 +8,12 @@ use std::rc::Rc;
 use gpui::Keystroke;
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 
+use super::sidebar::{self, SharedSidebar};
 use super::{Config, Loaded, json};
 use crate::plugins::loader::{self, LuaPath};
 use crate::plugins::paths::Paths;
 use crate::plugins::spec::{self, PluginSpec, Spec};
+use crate::sidebar::Sidebar;
 use crate::tabs::prefix::{Action, Command, PREFIX_PLACEHOLDER, Trigger};
 use crate::theme;
 
@@ -19,7 +21,7 @@ use crate::theme;
 /// 不正な値ならエラーメッセージを返す。`error(..., 2)` で呼び出した行をエラー位置にする。
 const PRELUDE: &str = r#"
 local set, get, ui_set, ui_get, keymap_set, keymap_del, action, action_names, plugins_setup,
-    theme_register, json_decode, json_encode, json_array, json_null = ...
+    theme_register, json_decode, json_encode, json_array, json_null, sidebar_functions = ...
 local function check(err)
     if err then error(err, 3) end
 end
@@ -79,6 +81,14 @@ local json = {
     array = checked(json_array),
     null = json_null,
 }
+-- キューに積まず、その場でサイドバーを書き換える
+local sidebar = {}
+for _, name in ipairs({ "set", "del", "toggle", "show", "hide" }) do
+    local f = sidebar_functions[name]
+    sidebar[name] = function(...)
+        check(f(...))
+    end
+end
 kugutsu = {
     opt = opt,
     ui = ui,
@@ -87,6 +97,7 @@ kugutsu = {
     plugins = plugins,
     theme = theme,
     json = json,
+    sidebar = sidebar,
 }
 -- Lua 5.4 の require はローダーのデータ（ファイルのパス）も返すので、
 -- `setup({ "a/b", require("plugins.ui") })` のように table の最後に書いても値が 1 つになるようにする
@@ -159,9 +170,16 @@ impl PartialEq for LuaCallback {
 #[derive(Clone)]
 pub struct Runtime {
     lua: Rc<Lua>,
+    /// `kugutsu.sidebar` で書き込んだ右サイドバーのセクション。
+    sidebar: SharedSidebar,
 }
 
 impl Runtime {
+    /// 右サイドバーのセクション。ビューは描画のたびに読む。
+    pub fn sidebar(&self) -> &RefCell<Sidebar> {
+        &self.sidebar
+    }
+
     /// メインスレッドで Lua を呼ぶ。エラーはスタックトレースを落としたメッセージで返す。
     pub fn call(&self, f: impl FnOnce(&Lua) -> mlua::Result<()>) -> Result<(), String> {
         f(&self.lua).map_err(|err| error_message(&err))
@@ -212,7 +230,8 @@ fn evaluate_in(
     let state = SharedState::default();
     let lua = Lua::new();
     let mut errors = Vec::new();
-    let lua_path = match prepare(&lua, &state, paths) {
+    let sidebar = SharedSidebar::default();
+    let lua_path = match prepare(&lua, &state, &sidebar, paths) {
         Ok(lua_path) => {
             // `=` で始まる名前はそのままエラー位置に出る（`init.lua:3: ...`）
             let result = lua.load(source).set_name(format!("={chunk_name}")).exec();
@@ -277,13 +296,21 @@ fn evaluate_in(
         config,
         errors,
         missing_plugins,
-        runtime: Some(Runtime { lua: Rc::new(lua) }),
+        runtime: Some(Runtime {
+            lua: Rc::new(lua),
+            sidebar,
+        }),
     };
     (loaded, specs)
 }
 
 /// `kugutsu` グローバルを組み立て、`package.path` を設定する。
-fn prepare(lua: &Lua, state: &SharedState, paths: Option<&Paths>) -> mlua::Result<LuaPath> {
+fn prepare(
+    lua: &Lua,
+    state: &SharedState,
+    sidebar: &SharedSidebar,
+    paths: Option<&Paths>,
+) -> mlua::Result<LuaPath> {
     let queue: ActionQueue = Rc::default();
     let (set, get) = option_functions(lua, state, set_option, get_option)?;
     let (ui_set, ui_get) = option_functions(lua, state, set_ui_option, get_ui_option)?;
@@ -351,6 +378,7 @@ fn prepare(lua: &Lua, state: &SharedState, paths: Option<&Paths>) -> mlua::Resul
         json_encode,
         json_array,
         lua.null(),
+        sidebar::functions(lua, sidebar)?,
     ))?;
     LuaPath::install(lua, paths.map(|paths| paths.config_dir.as_path()))
 }

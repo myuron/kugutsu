@@ -440,6 +440,11 @@ impl WorkspaceView {
         // 古い Lua state で始めたタスクを止め、まだ届いていない結果も捨てる
         self.lua_generation += 1;
         self.lua_tasks.clear();
+        // セクションは新しい Lua state で set し直してもらう。隠していた id は隠したままにする
+        if let (Some(old), Some(new)) = (&self.lua, &runtime) {
+            let hidden = old.sidebar().borrow().hidden_ids();
+            new.sidebar().borrow_mut().restore_hidden(hidden);
+        }
         self.lua = runtime;
         // キーマップごと置き換えるので、古い Lua 関数と一緒に古い Lua state も捨てられる
         self.keymap = PrefixKeymap::new(config.prefix.clone(), config.keymap.clone());
@@ -772,21 +777,7 @@ impl WorkspaceView {
                     .child("kugutsu"),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(px(10.0))
-                    .h(px(TAB_BAR_HEIGHT))
-                    .px(px(14.0))
-                    .text_size(px(TEXT_SM))
-                    .child(
-                        div()
-                            .flex_1()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(ui.inactive_foreground))
-                            .child("AGENTS"),
-                    )
+                sidebar_heading(ui, "AGENTS")
                     .children(blocked.map(|blocked| {
                         div()
                             .debug_selector(|| "agents-blocked-count".into())
@@ -808,6 +799,61 @@ impl WorkspaceView {
                     .pb(px(10.0))
                     .children(elements),
             )
+    }
+
+    /// プラグインが `kugutsu.sidebar` で書き込んだセクションを並べる右サイドバー。
+    /// 見えるセクションが無ければ `None`（描かない）。描画中に Lua は呼ばない。
+    fn render_plugin_sidebar(&self) -> Option<impl IntoElement + use<>> {
+        let sidebar = self.lua.as_ref()?.sidebar().borrow();
+        let ui = &self.config.theme.ui;
+        let sections: Vec<_> = sidebar
+            .visible()
+            .map(|section| {
+                let id = section.id.clone();
+                let title_selector = format!("plugin-section-{id}-title");
+                let lines = section.lines.iter().enumerate().map(|(index, line)| {
+                    let selector = format!("plugin-section-{id}-line-{}", index + 1);
+                    div()
+                        .debug_selector(move || selector)
+                        .px(px(14.0))
+                        .text_color(rgb(ui.foreground))
+                        .child(line.clone())
+                });
+                div()
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("plugin-section-{id}")
+                    })
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .child(
+                        sidebar_heading(ui, section.title.clone())
+                            .debug_selector(move || title_selector),
+                    )
+                    .children(lines)
+            })
+            .collect();
+        if sections.is_empty() {
+            return None;
+        }
+        Some(
+            div()
+                .id("plugin-sidebar")
+                .debug_selector(|| "plugin-sidebar".into())
+                .flex()
+                .flex_col()
+                .flex_none()
+                .w(px(SIDEBAR_WIDTH))
+                .h_full()
+                .overflow_y_scroll()
+                .text_size(px(TEXT_MD))
+                .bg(self.config.translucent(ui.bar_background))
+                .border_l_1()
+                .border_color(rgb(ui.bar_border))
+                .pb(px(10.0))
+                .children(sections),
+        )
     }
 
     /// サイドバーのヘッダに出す blocked の数（0 なら `None`）と Agent の総数。
@@ -1379,7 +1425,8 @@ impl Render for WorkspaceView {
                                     .overflow_hidden()
                                     .children(self.render_panes(cx)),
                             ),
-                    ),
+                    )
+                    .children(self.render_plugin_sidebar()),
             )
             .child(self.render_status_line(cx))
             .when(self.keymap.is_armed(), |root| {
@@ -1389,6 +1436,25 @@ impl Render for WorkspaceView {
                 root.child(self.render_keymap_help(cx))
             })
     }
+}
+
+/// サイドバーの見出しの行（`AGENTS` やプラグインのセクション名）。右に要素を足せる。
+fn sidebar_heading(ui: &UiColors, title: impl Into<SharedString>) -> gpui::Div {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(10.0))
+        .h(px(TAB_BAR_HEIGHT))
+        .px(px(14.0))
+        .text_size(px(TEXT_SM))
+        .child(
+            div()
+                .flex_1()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(ui.inactive_foreground))
+                .child(title.into()),
+        )
 }
 
 /// workspace ライン・タブバー。項目は横スクロールし、右端の `<` `>` で 1 項目分ずつ動かす。
@@ -3116,5 +3182,137 @@ mod tests {
     fn window_title_falls_back_to_app_name() {
         assert_eq!(window_title(Some("vim")), "vim");
         assert_eq!(window_title(None), "kugutsu");
+    }
+
+    /// `<prefix>u` で `kugutsu.sidebar.toggle("a")` する割り当て。
+    const TOGGLE_A: &str =
+        r#"kugutsu.keymap.set("<prefix>u", function() kugutsu.sidebar.toggle("a") end)"#;
+
+    #[gpui::test]
+    fn plugin_sidebar_is_not_rendered_without_sections(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace_with_init_lua(cx, "");
+        cx.run_until_parked();
+        assert!(!is_rendered(cx, "plugin-sidebar"));
+    }
+
+    #[gpui::test]
+    fn plugin_sidebar_lists_sections_right_of_the_panes(cx: &mut TestAppContext) {
+        let (_workspace, cx) = open_workspace_with_init_lua(
+            cx,
+            r#"kugutsu.sidebar.set("a", { title = "A", lines = { "1", "2" } })
+            kugutsu.sidebar.set("b", { title = "B", lines = { "3" } })"#,
+        );
+        cx.run_until_parked();
+        let sidebar = bounds(cx, "plugin-sidebar");
+        assert!(sidebar.left() >= bounds(cx, "panes").right());
+        assert_eq!(sidebar.size.width, px(SIDEBAR_WIDTH));
+        // ステータスラインの上まで
+        assert!(sidebar.bottom() <= bounds(cx, "status-line").top());
+        let a = bounds(cx, "plugin-section-a");
+        let b = bounds(cx, "plugin-section-b");
+        assert!(sidebar.contains(&a.center()) && sidebar.contains(&b.center()));
+        assert!(a.bottom() <= b.top());
+        let title = bounds(cx, "plugin-section-a-title");
+        let first = bounds(cx, "plugin-section-a-line-1");
+        let second = bounds(cx, "plugin-section-a-line-2");
+        assert!(title.bottom() <= first.top() && first.bottom() <= second.top());
+        assert!(a.contains(&second.center()));
+        assert!(b.contains(&bounds(cx, "plugin-section-b-line-1").center()));
+        assert!(cx.debug_bounds("plugin-section-b-line-2").is_none());
+    }
+
+    #[gpui::test]
+    fn mapped_toggle_hides_and_shows_the_latest_lines(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(
+            cx,
+            &format!(
+                r#"kugutsu.sidebar.set("a", {{ title = "A", lines = {{ "1" }} }})
+                {TOGGLE_A}"#
+            ),
+        );
+        cx.run_until_parked();
+        assert!(is_rendered(cx, "plugin-section-a"));
+        cx.simulate_keystrokes("ctrl-b u");
+        assert!(!is_rendered(cx, "plugin-sidebar"));
+        // 隠している間も更新を受ける
+        run_lua_after(
+            &workspace,
+            cx,
+            Duration::from_millis(100),
+            r#"kugutsu.sidebar.set("a", { title = "A", lines = { "1", "2" } })"#,
+        );
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(!is_rendered(cx, "plugin-sidebar"));
+        cx.simulate_keystrokes("ctrl-b u");
+        assert!(is_rendered(cx, "plugin-section-a-line-2"));
+    }
+
+    #[gpui::test]
+    fn callbacks_add_and_delete_sections(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(cx, "");
+        run_lua_after(
+            &workspace,
+            cx,
+            Duration::from_millis(100),
+            r#"kugutsu.sidebar.set("a", { title = "A", lines = { "1" } })"#,
+        );
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(is_rendered(cx, "plugin-section-a-line-1"));
+        run_lua_after(
+            &workspace,
+            cx,
+            Duration::from_millis(100),
+            r#"kugutsu.sidebar.del("a")"#,
+        );
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(!is_rendered(cx, "plugin-sidebar"));
+    }
+
+    #[gpui::test]
+    fn reload_clears_sections_and_keeps_hidden_ones_hidden(cx: &mut TestAppContext) {
+        let (workspace, cx, source) = open_reloadable_workspace(
+            cx,
+            &format!(
+                r#"kugutsu.sidebar.set("a", {{ title = "A", lines = {{}} }})
+                kugutsu.sidebar.set("b", {{ title = "B", lines = {{}} }})
+                {TOGGLE_A}"#
+            ),
+        );
+        run_lua_after(
+            &workspace,
+            cx,
+            Duration::from_millis(100),
+            r#"kugutsu.sidebar.set("c", { title = "C", lines = {} })"#,
+        );
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(is_rendered(cx, "plugin-section-c"));
+        cx.simulate_keystrokes("ctrl-b u");
+        assert!(!is_rendered(cx, "plugin-section-a"));
+
+        cx.simulate_keystrokes("ctrl-b r");
+        // init.lua が set し直したものだけが出て、隠していた a は隠したまま
+        assert!(is_rendered(cx, "plugin-section-b"));
+        assert!(!is_rendered(cx, "plugin-section-a"));
+        assert!(!is_rendered(cx, "plugin-section-c"));
+        cx.simulate_keystrokes("ctrl-b u");
+        assert!(is_rendered(cx, "plugin-section-a"));
+
+        *source.borrow_mut() = String::new();
+        cx.simulate_keystrokes("ctrl-b r");
+        assert!(!is_rendered(cx, "plugin-sidebar"));
+    }
+
+    #[gpui::test]
+    fn sidebar_errors_from_mappings_are_shown_in_status_line(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(cx, TOGGLE_A);
+        cx.simulate_keystrokes("ctrl-b u");
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.config_error_message()),
+            Some("init.lua:1: kugutsu.sidebar.toggle: no section 'a'".to_string())
+        );
     }
 }

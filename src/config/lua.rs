@@ -140,6 +140,32 @@ impl PartialEq for LuaCallback {
     }
 }
 
+/// `init.lua` を評価した Lua。評価の後もビューが持ち、gpui のタスクなどから Lua を呼び戻す。
+#[derive(Clone)]
+pub struct Runtime {
+    lua: Rc<Lua>,
+}
+
+impl Runtime {
+    /// メインスレッドで Lua を呼ぶ。エラーはスタックトレースを落としたメッセージで返す。
+    pub fn call(&self, f: impl FnOnce(&Lua) -> mlua::Result<()>) -> Result<(), String> {
+        f(&self.lua).map_err(|err| error_message(&err))
+    }
+}
+
+impl fmt::Debug for Runtime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Runtime")
+    }
+}
+
+impl PartialEq for Runtime {
+    /// 同じ Lua state を指すときだけ等しい。
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.lua, &other.lua)
+    }
+}
+
 /// Lua のソースを評価して設定を読み込む。`chunk_name` はエラーメッセージに出す名前。
 /// エラーが起きてもそこまでに設定された値は残す。プラグインの置き場所は無いものとする。
 #[cfg(test)]
@@ -236,6 +262,7 @@ fn evaluate_in(
         config,
         errors,
         missing_plugins,
+        runtime: Some(Runtime { lua: Rc::new(lua) }),
     };
     (loaded, specs)
 }
@@ -1279,5 +1306,28 @@ mod tests {
             "{:?}",
             loaded.errors
         );
+    }
+
+    #[test]
+    fn runtime_outlives_init_lua_evaluation() {
+        let loaded = eval("x = 41");
+        let runtime = loaded.runtime.expect("runtime");
+        let mut x = 0;
+        runtime
+            .call(|lua| {
+                x = lua.globals().get("x")?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(x, 41);
+    }
+
+    #[test]
+    fn runtime_call_errors_have_no_traceback() {
+        let runtime = eval("").runtime.expect("runtime");
+        let err = runtime
+            .call(|lua| lua.load("error('boom')").set_name("=cb").exec())
+            .unwrap_err();
+        assert_eq!(err, "cb:1: boom");
     }
 }

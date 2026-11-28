@@ -1,7 +1,7 @@
 //! ユーザー設定（`init.lua`）。
 //!
 //! `init.lua` は起動時と `reload_config` のたびに新しい Lua state で評価して [`Config`] に
-//! 読み込む。Lua を使うのはこのモジュールだけで、ほかのコードは [`Config`] だけを見る。
+//! 読み込む。評価した Lua state は [`Runtime`] としてビューが持ち、次の読み込み直しまで生かす。
 
 mod lua;
 
@@ -17,7 +17,7 @@ use crate::theme::Theme;
 
 #[cfg(test)]
 pub use lua::evaluate;
-pub use lua::{LuaCallback, evaluate_spec, evaluate_with};
+pub use lua::{LuaCallback, Runtime, evaluate_spec, evaluate_with};
 pub(crate) use lua::{error_message, lua_type_name};
 
 /// 設定ファイルの名前（エラー表示にも使う）。
@@ -109,6 +109,8 @@ pub struct Loaded {
     pub errors: Vec<String>,
     /// spec にあるが、まだインストールされていないプラグインの名前。
     pub missing_plugins: Vec<String>,
+    /// 評価した Lua state。`init.lua` を読めなかったときは `None`。
+    pub runtime: Option<Runtime>,
 }
 
 /// 設定ファイルのパスを直接指定する環境変数。
@@ -266,10 +268,12 @@ mod tests {
     #[test]
     fn missing_file_means_defaults_without_errors() {
         let path = temp_dir("missing").join("init.lua");
-        assert_eq!(
-            load(&Paths::new(path.clone(), None, None)),
-            Loaded::default()
-        );
+        let loaded = load(&Paths::new(path.clone(), None, None));
+        assert_eq!(loaded.config, Config::default());
+        assert_eq!(loaded.errors, Vec::<String>::new());
+        assert_eq!(loaded.missing_plugins, Vec::<String>::new());
+        // 空の init.lua として評価するので Lua state はある
+        assert!(loaded.runtime.is_some());
     }
 
     #[test]

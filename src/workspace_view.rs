@@ -10,11 +10,15 @@ use gpui::{
     pulsating_between, px, rgb, rgba, svg,
 };
 
+use std::collections::HashMap;
+use std::future::Future;
 use std::rc::Rc;
 use std::time::Duration;
 
+use mlua::Lua;
+
 use crate::agents::{AgentKind, AgentState};
-use crate::config::{Config, Loaded};
+use crate::config::{Config, Loaded, Runtime};
 use crate::icons::{Icon, state_icon};
 use crate::panes::{Axis, Node, PaneId, Panes};
 use crate::tabs::Tabs;
@@ -120,6 +124,14 @@ pub struct WorkspaceView {
     ui_font: Option<SharedString>,
     /// `reload_config` で `init.lua` を読み込み直す関数。
     load_config: ConfigLoader,
+    /// 今の設定を評価した Lua state。`reload_config` で置き換える。
+    lua: Option<Runtime>,
+    /// `lua` を置き換えるたびに増やす。古い Lua state で始めたタスクの結果を捨てるのに使う。
+    lua_generation: u64,
+    /// 今の Lua state で始めたタスク（キーは [`Self::spawn_lua`] が振る番号）。
+    /// `reload_config` で捨てると、タスクも止まる。
+    lua_tasks: HashMap<u64, Task<()>>,
+    next_lua_task: u64,
     _agent_poll: Task<()>,
 }
 
@@ -143,6 +155,7 @@ impl WorkspaceView {
             config,
             errors: config_errors,
             missing_plugins,
+            runtime,
         } = config;
         let first = Self::create_pane(terminal, events, &config, window, cx);
         let ui_font = resolve_ui_font(&config, window);
@@ -154,6 +167,10 @@ impl WorkspaceView {
             missing_plugins,
             ui_font,
             load_config,
+            lua: runtime,
+            lua_generation: 0,
+            lua_tasks: HashMap::new(),
+            next_lua_task: 0,
             spawn_options,
             sidebar_visible: true,
             keymap_help_visible: false,
@@ -175,6 +192,42 @@ impl WorkspaceView {
                 }
             }
         })
+    }
+
+    /// 今の Lua state で `f` を呼ぶ。エラーはステータスラインに出し、呼んだ後は描き直す。
+    fn run_lua(&mut self, f: impl FnOnce(&Lua) -> mlua::Result<()>, cx: &mut Context<Self>) {
+        if let Some(Err(err)) = self.lua.as_ref().map(|runtime| runtime.call(f)) {
+            self.config_errors.push(err);
+        }
+        cx.notify();
+    }
+
+    /// `work` を待ってから、その結果でメインスレッドの Lua を呼び戻す（`then`）。
+    /// 待っている間に `reload_config` したら、タスクを止めて `then` は呼ばない。
+    // `kugutsu.timer`（#62）と `kugutsu.system`（#63）で使う
+    #[allow(dead_code)]
+    fn spawn_lua<T: 'static>(
+        &mut self,
+        work: impl Future<Output = T> + 'static,
+        then: impl FnOnce(&Lua, T) -> mlua::Result<()> + 'static,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let generation = self.lua_generation;
+        let id = self.next_lua_task;
+        self.next_lua_task += 1;
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let value = work.await;
+            this.update(cx, |this, cx| {
+                if this.lua_generation != generation {
+                    return;
+                }
+                this.lua_tasks.remove(&id);
+                this.run_lua(|lua| then(lua, value), cx);
+            })
+            .ok();
+        });
+        self.lua_tasks.insert(id, task);
     }
 
     /// アクティブな workspace のタブ集合。
@@ -317,14 +370,17 @@ impl WorkspaceView {
     fn perform(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
         let commands = match action {
             Action::Command(command) => vec![command],
-            Action::Lua(callback) => match callback.call() {
-                Ok(commands) => commands,
-                Err(err) => {
-                    self.config_errors.push(err);
-                    cx.notify();
-                    return;
+            Action::Lua(callback) => {
+                // 関数が Lua から書き換えた状態を描き直す
+                cx.notify();
+                match callback.call() {
+                    Ok(commands) => commands,
+                    Err(err) => {
+                        self.config_errors.push(err);
+                        return;
+                    }
                 }
-            },
+            }
         };
         for command in commands {
             self.run(command, window, cx);
@@ -379,7 +435,12 @@ impl WorkspaceView {
             config,
             errors,
             missing_plugins,
+            runtime,
         } = loaded;
+        // 古い Lua state で始めたタスクを止め、まだ届いていない結果も捨てる
+        self.lua_generation += 1;
+        self.lua_tasks.clear();
+        self.lua = runtime;
         // キーマップごと置き換えるので、古い Lua 関数と一緒に古い Lua state も捨てられる
         self.keymap = PrefixKeymap::new(config.prefix.clone(), config.keymap.clone());
         self.ui_font = resolve_ui_font(&config, window);
@@ -1698,7 +1759,7 @@ mod tests {
     use super::*;
     use crate::agents::AgentTracker;
     use gpui::{TestAppContext, VisualTestContext};
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     fn sleep_options() -> SpawnOptions {
         SpawnOptions {
@@ -2848,6 +2909,151 @@ mod tests {
             workspace.read_with(cx, |workspace, _| workspace.config_error_message()),
             Some("init.lua:1: boom".to_string())
         );
+    }
+
+    /// ビューが持つ Lua state のグローバル変数 `name`（整数）。
+    fn lua_global(
+        workspace: &Entity<WorkspaceView>,
+        cx: &mut VisualTestContext,
+        name: &str,
+    ) -> i64 {
+        workspace.read_with(cx, |workspace, _| {
+            let mut value = 0;
+            let runtime = workspace.lua.as_ref().expect("runtime");
+            runtime
+                .call(|lua| {
+                    value = lua.globals().get(name)?;
+                    Ok(())
+                })
+                .unwrap();
+            value
+        })
+    }
+
+    /// `delay` 経ってから、ビューの Lua state で `source` を実行するタスクを始める。
+    fn run_lua_after(
+        workspace: &Entity<WorkspaceView>,
+        cx: &mut VisualTestContext,
+        delay: Duration,
+        source: &'static str,
+    ) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            let timer = cx.background_executor().timer(delay);
+            workspace.spawn_lua(
+                timer,
+                move |lua, ()| lua.load(source).set_name("=callback").exec(),
+                window,
+                cx,
+            );
+        });
+    }
+
+    /// `workspace` が notify した回数を数える。
+    fn count_notifications(
+        workspace: &Entity<WorkspaceView>,
+        cx: &mut VisualTestContext,
+    ) -> (Rc<Cell<usize>>, Subscription) {
+        let count = Rc::new(Cell::new(0));
+        let subscription = cx.update(|_, cx| {
+            cx.observe(workspace, {
+                let count = count.clone();
+                move |_, _| count.set(count.get() + 1)
+            })
+        });
+        (count, subscription)
+    }
+
+    #[gpui::test]
+    fn lua_callbacks_run_after_the_work_finishes(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(cx, "count = 0");
+        run_lua_after(
+            &workspace,
+            cx,
+            Duration::from_millis(100),
+            "count = count + 1",
+        );
+        cx.run_until_parked();
+        assert_eq!(lua_global(&workspace, cx, "count"), 0);
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert_eq!(lua_global(&workspace, cx, "count"), 1);
+    }
+
+    #[gpui::test]
+    fn lua_callbacks_redraw_the_view(cx: &mut TestAppContext) {
+        let (workspace, cx) = open_workspace_with_init_lua(cx, "");
+        run_lua_after(&workspace, cx, Duration::from_millis(100), "");
+        cx.run_until_parked();
+        let (count, _subscription) = count_notifications(&workspace, cx);
+        // Agent の状態を調べるより前に呼び戻す
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(count.get() > 0);
+    }
+
+    #[gpui::test]
+    fn errors_from_lua_callbacks_are_shown_in_status_line(cx: &mut TestAppContext) {
+        let (workspace, cx) =
+            open_workspace_with_init_lua(cx, r#"function boom() error("boom") end"#);
+        run_lua_after(&workspace, cx, Duration::from_millis(100), "boom()");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("config-error").is_none());
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("config-error").is_some());
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.config_error_message()),
+            Some("init.lua:1: boom".to_string())
+        );
+    }
+
+    #[gpui::test]
+    fn reload_discards_callbacks_of_the_old_runtime(cx: &mut TestAppContext) {
+        let (workspace, cx, _source) = open_reloadable_workspace(cx, "");
+        let called = Rc::new(Cell::new(false));
+        workspace.update_in(cx, |workspace, window, cx| {
+            let timer = cx.background_executor().timer(Duration::from_millis(100));
+            let called = called.clone();
+            workspace.spawn_lua(
+                timer,
+                move |_, ()| {
+                    called.set(true);
+                    Ok(())
+                },
+                window,
+                cx,
+            );
+        });
+        cx.simulate_keystrokes("ctrl-b r");
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert!(!called.get());
+        assert_eq!(
+            workspace.read_with(cx, |workspace, _| workspace.config_error_message()),
+            None
+        );
+    }
+
+    #[gpui::test]
+    fn reload_replaces_the_lua_runtime(cx: &mut TestAppContext) {
+        let (workspace, cx, source) = open_reloadable_workspace(cx, "x = 1");
+        assert_eq!(lua_global(&workspace, cx, "x"), 1);
+        *source.borrow_mut() = "x = 2".into();
+        cx.simulate_keystrokes("ctrl-b r");
+        assert_eq!(lua_global(&workspace, cx, "x"), 2);
+    }
+
+    #[gpui::test]
+    fn lua_mapping_without_actions_redraws_the_view(cx: &mut TestAppContext) {
+        // prefix を使わないので、prefix の解除による描き直しは起きない
+        let (workspace, cx) = open_workspace_with_init_lua(
+            cx,
+            r#"kugutsu.keymap.set("ctrl-shift-w", function() end)"#,
+        );
+        cx.run_until_parked();
+        let (count, _subscription) = count_notifications(&workspace, cx);
+        cx.simulate_keystrokes("ctrl-shift-w");
+        assert!(count.get() > 0);
     }
 
     #[gpui::test]

@@ -6,9 +6,9 @@ use std::fmt;
 use std::rc::Rc;
 
 use gpui::Keystroke;
-use mlua::{Function, Lua, Table, Value};
+use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
 
-use super::{Config, Loaded};
+use super::{Config, Loaded, json};
 use crate::plugins::loader::{self, LuaPath};
 use crate::plugins::paths::Paths;
 use crate::plugins::spec::{self, PluginSpec, Spec};
@@ -19,7 +19,7 @@ use crate::theme;
 /// 不正な値ならエラーメッセージを返す。`error(..., 2)` で呼び出した行をエラー位置にする。
 const PRELUDE: &str = r#"
 local set, get, ui_set, ui_get, keymap_set, keymap_del, action, action_names, plugins_setup,
-    theme_register = ...
+    theme_register, json_decode, json_encode, json_array, json_null = ...
 local function check(err)
     if err then error(err, 3) end
 end
@@ -65,6 +65,20 @@ local theme = {
         check(theme_register(t))
     end,
 }
+-- 値と、不正ならエラーメッセージを返す Rust の関数を、エラーを投げる関数にする
+local function checked(f)
+    return function(value)
+        local result, err = f(value)
+        check(err)
+        return result
+    end
+end
+local json = {
+    decode = checked(json_decode),
+    encode = checked(json_encode),
+    array = checked(json_array),
+    null = json_null,
+}
 kugutsu = {
     opt = opt,
     ui = ui,
@@ -72,6 +86,7 @@ kugutsu = {
     action = actions,
     plugins = plugins,
     theme = theme,
+    json = json,
 }
 -- Lua 5.4 の require はローダーのデータ（ファイルのパス）も返すので、
 -- `setup({ "a/b", require("plugins.ui") })` のように table の最後に書いても値が 1 つになるようにする
@@ -288,6 +303,11 @@ fn prepare(lua: &Lua, state: &SharedState, paths: Option<&Paths>) -> mlua::Resul
             Err(err) => Some(format!("kugutsu.theme.register: {err}")),
         })
     })?;
+    let json_decode =
+        lua.create_function(|lua, text: Value| Ok(split(json::decode(lua, &text))))?;
+    let json_encode = lua.create_function(|_, value: Value| Ok(split(json::encode(&value))))?;
+    let json_array =
+        lua.create_function(|lua, value: Value| Ok(split(json::array(lua, &value))))?;
     lua.load(PRELUDE).set_name("=prelude").call::<()>((
         set,
         get,
@@ -299,8 +319,20 @@ fn prepare(lua: &Lua, state: &SharedState, paths: Option<&Paths>) -> mlua::Resul
         action_names,
         plugins_setup,
         theme_register,
+        json_decode,
+        json_encode,
+        json_array,
+        lua.null(),
     ))?;
     LuaPath::install(lua, paths.map(|paths| paths.config_dir.as_path()))
+}
+
+/// 結果を Lua に返す `(値, エラーメッセージ)` の組にする。
+fn split<T>(result: Result<T, String>) -> (Option<T>, Option<String>) {
+    match result {
+        Ok(value) => (Some(value), None),
+        Err(err) => (None, Some(err)),
+    }
 }
 
 type SetOption = fn(&mut State, &str, &Value) -> Result<(), String>;
@@ -1269,6 +1301,87 @@ mod tests {
     fn evaluate_spec_does_not_resolve_the_theme() {
         let (_, errors) = evaluate_spec(r#"kugutsu.opt.theme = "from-a-plugin""#, "init.lua", None);
         assert_eq!(errors, Vec::<String>::new());
+    }
+
+    #[test]
+    fn json_decode_builds_lua_values() {
+        eval_ok(
+            r#"local data = kugutsu.json.decode('{"totals":{"totalCost":1.5},"items":[1,"two",true],"ok":false}')
+            assert(data.totals.totalCost == 1.5)
+            assert(#data.items == 3)
+            assert(data.items[1] == 1 and data.items[2] == "two" and data.items[3] == true)
+            assert(data.ok == false)
+            assert(kugutsu.json.decode("42") == 42)
+            assert(kugutsu.json.decode('"text"') == "text")"#,
+        );
+    }
+
+    #[test]
+    fn json_null_keeps_array_length() {
+        eval_ok(
+            r#"local list = kugutsu.json.decode("[1, null, 3]")
+            assert(#list == 3)
+            assert(list[2] == kugutsu.json.null)
+            assert(list[3] == 3)
+            assert(kugutsu.json.decode("null") == kugutsu.json.null)"#,
+        );
+    }
+
+    #[test]
+    fn json_encode_writes_json() {
+        eval_ok(
+            r#"local json = kugutsu.json
+            assert(json.encode({ b = { 1, 2 }, a = 1 }) == '{"a":1,"b":[1,2]}')
+            assert(json.encode({}) == "{}")
+            assert(json.encode(json.array({})) == "[]")
+            assert(json.encode(json.decode("[]")) == "[]")
+            assert(json.encode(json.decode('{"a":[]}')) == '{"a":[]}')
+            assert(json.encode(json.null) == "null")
+            assert(json.encode({ 1, json.null, 3 }) == "[1,null,3]")
+            assert(json.encode("a\"b") == '"a\\"b"')
+            assert(json.encode(true) == "true")"#,
+        );
+    }
+
+    #[test]
+    fn json_array_returns_the_table() {
+        eval_ok(
+            r#"local t = { 1 }
+            assert(kugutsu.json.array(t) == t)"#,
+        );
+        eval_err(
+            "kugutsu.json.array(1)",
+            "init.lua:1: kugutsu.json.array: expected table, got number",
+        );
+    }
+
+    #[test]
+    fn json_errors_point_at_the_caller() {
+        eval_err(
+            r#"kugutsu.json.decode("{")"#,
+            "init.lua:1: kugutsu.json.decode:",
+        );
+        eval_err(
+            "kugutsu.json.decode(1)",
+            "init.lua:1: kugutsu.json.decode: expected string, got number",
+        );
+        eval_err(
+            "kugutsu.json.encode(function() end)",
+            "init.lua:1: kugutsu.json.encode:",
+        );
+        eval_err(
+            "local t = {}\nt.self = t\nkugutsu.json.encode(t)",
+            "init.lua:3: kugutsu.json.encode:",
+        );
+    }
+
+    #[test]
+    fn json_errors_can_be_caught() {
+        eval_ok(
+            r#"local ok, err = pcall(kugutsu.json.decode, "x")
+            assert(not ok)
+            assert(err:find("kugutsu.json.decode", 1, true))"#,
+        );
     }
 
     #[test]

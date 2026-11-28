@@ -440,6 +440,21 @@ notes.kugutsu/
 
 Errors are shown in the status line with the plugin name (e.g. `notes.kugutsu: plugin/notes.lua:12: ...`). The rest of that plugin is skipped; other plugins are not affected.
 
+### JSON
+
+`kugutsu.json` converts between JSON and Lua values, e.g. to read the `--json` output of a CLI tool. It can be called anywhere, including while `init.lua` is evaluated.
+
+```lua
+local data = kugutsu.json.decode('{"totals":{"totalCost":1.5},"days":[]}')
+print(data.totals.totalCost)                 -- 1.5
+
+kugutsu.json.encode({ b = { 1, 2 }, a = 1 }) -- '{"a":1,"b":[1,2]}' (keys are sorted)
+```
+
+- JSON `null` becomes `kugutsu.json.null`, so arrays keep their length: `#kugutsu.json.decode("[1,null,3]") == 3`.
+- An empty table encodes as `{}`. Wrap it with `kugutsu.json.array(t)` to encode it as `[]`. Arrays returned by `decode` are already marked, so `[]` stays `[]`.
+- Invalid JSON and values that cannot be encoded (functions, userdata, tables that contain themselves) raise an error. Use `pcall` to handle it.
+
 ### External plugins (Nix)
 
 A symlink or a directory without `.git` under `$XDG_DATA_HOME/kugutsu/plugins/` is **external**: `kugutsu install` never clones, checks out or removes it, and Kugutsu loads it like any other plugin when its name is in the spec. This way plugins can be provided from the Nix store, and the same `init.lua` works on machines with and without Nix.

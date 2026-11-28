@@ -2178,15 +2178,35 @@ mod tests {
 
     /// `claude` という名前で動く（Claude Code として検出される）偽の Agent。
     fn fake_claude() -> SpawnOptions {
-        let dir = std::env::temp_dir().join(format!("kugutsu-test-{}", std::process::id()));
+        // テストは並行に動くので、呼ぶたびに別のディレクトリを使う。動いているバイナリを
+        // 別のテストが上書きすると、macOS では署名が壊れてプロセスが kill される
+        static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("kugutsu-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("claude");
-        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
-        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        let program = dir.join("claude");
+        let args = write_fake_claude(&program);
         SpawnOptions {
-            program: Some((script.to_string_lossy().into_owned(), Vec::new())),
+            program: Some((program.to_string_lossy().into_owned(), args)),
         }
+    }
+
+    /// Linux はシェバンのスクリプトでも comm がスクリプト名になる。NixOS には `/bin/sleep` が
+    /// 無いので、スクリプトで `sleep` を呼ぶ。
+    #[cfg(not(target_os = "macos"))]
+    fn write_fake_claude(path: &std::path::Path) -> Vec<String> {
+        std::fs::write(path, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        Vec::new()
+    }
+
+    /// macOS はシェバンのスクリプトをインタプリタの名前で報告するので、`sleep` 自体を
+    /// `claude` という名前でコピーする。
+    #[cfg(target_os = "macos")]
+    fn write_fake_claude(path: &std::path::Path) -> Vec<String> {
+        std::fs::copy("/bin/sleep", path).unwrap();
+        vec!["30".to_string()]
     }
 
     /// ポーリングを進め、条件を満たすまで待つ（PTY 上のプロセスは実時間で動くため）。
@@ -2228,7 +2248,7 @@ mod tests {
         workspace.read_with(cx, |w, _| w.active_tabs().unwrap().iter().count())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[gpui::test]
     fn clicking_agent_in_sidebar_focuses_its_tab(cx: &mut TestAppContext) {
         let (workspace, cx) = open_workspace_with(cx, fake_claude());
@@ -2247,7 +2267,7 @@ mod tests {
         assert_eq!(active_position(&workspace, cx), (0, 0));
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[gpui::test]
     fn clicking_agent_in_other_workspace_switches_to_it(cx: &mut TestAppContext) {
         let (workspace, cx) = open_workspace_with(cx, fake_claude());

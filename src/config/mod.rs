@@ -3,6 +3,7 @@
 //! `init.lua` は起動時と `reload_config` のたびに新しい Lua state で評価して [`Config`] に
 //! 読み込む。評価した Lua state は [`Runtime`] としてビューが持ち、次の読み込み直しまで生かす。
 
+mod json;
 mod lua;
 
 use std::ffi::OsString;
